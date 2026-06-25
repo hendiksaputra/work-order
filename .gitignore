@@ -1,0 +1,57 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/
+.cursor/
+
+# Env & secrets (never commit)
+.env
+.env.local
+.env.production
+.env.*.local
+backend/.env
+frontend/.env.local
+frontend/.env.production
+deploy/**/.env*
+
+# Keep examples
+!.env.example
+!**/.env.example
+!**/.env.*.example
+
+# Laravel backend
+backend/vendor/
+backend/node_modules/
+backend/public/build/
+backend/public/hot/
+backend/public/storage
+backend/storage/*.key
+backend/storage/pail/
+backend/bootstrap/cache/*.php
+!backend/bootstrap/cache/.gitignore
+
+# Next.js frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.vercel/
+frontend/*.tsbuildinfo
+
+# Deploy artifacts (build on server/CI, do not commit)
+deploy/wo-aps-frontend/
+
+# Server runtime logs
+logs/
+
+# NSSM binary (download manually on server)
+scripts/nssm/
+
+# Playwright / local tooling
+.playwright-mcp/
+
+# PHP / test caches
+.phpunit.result.cache
+.phpunit.cache
