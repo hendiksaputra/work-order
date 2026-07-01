@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Concerns\AuthorizesRequests;
 use App\Http\Controllers\Controller;
 use App\Models\PartsRequest;
+use App\Models\User;
 use App\Support\Permission;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -15,11 +16,18 @@ class PartsRequestController extends Controller
 
     public function index(Request $request)
     {
-        $query = PartsRequest::with(['workOrder', 'creator', 'items'])
-            ->latest();
+        $viewer = $request->user();
 
-        if ($request->user()->role === 'mechanic') {
-            $query->where('created_by', $request->user()->id);
+        $query = PartsRequest::with([
+            'workOrder.subWorkOrders:id,parent_id,workshop,type',
+            'creator',
+            'items',
+        ])->latest();
+
+        if ($viewer->role === 'mechanic') {
+            $query->where('created_by', $viewer->id);
+        } elseif ($this->shouldScopePartsByWorkOrder($viewer)) {
+            $this->applyWorkOrderScope($query, $viewer);
         }
 
         if ($request->filled('status')) {
@@ -29,14 +37,123 @@ class PartsRequestController extends Controller
         return response()->json($query->paginate($request->integer('per_page', 15)));
     }
 
-    public function pendingApprovalCount()
+    public function pendingApprovalCount(Request $request)
     {
-        $count = PartsRequest::where('status', 'pending_approval')->count();
+        $viewer = $request->user();
+
+        if (
+            ! $viewer->canViewAllDepartments()
+            && ! $viewer->hasPermission(Permission::PARTS_SUPERVISOR)
+        ) {
+            return response()->json(['message' => 'Unauthorized'], 403);
+        }
+
+        if ($viewer->canViewAllDepartments()) {
+            return response()->json($this->pendingApprovalSummaryForPlanner());
+        }
+
+        $query = PartsRequest::query()->where('status', 'pending_approval');
+        $this->applyWorkOrderScope($query, $viewer);
 
         return response()->json([
-            'count' => $count,
+            'count' => $query->count(),
             'label' => 'Parts request menunggu persetujuan supervisor',
         ]);
+    }
+
+    /**
+     * @return array{count: int, label: string, by_department: list<array{department: string, workshop: string, count: int, supervisors: list<string>}>}
+     */
+    private function pendingApprovalSummaryForPlanner(): array
+    {
+        $pending = PartsRequest::query()
+            ->where('status', 'pending_approval')
+            ->with(['workOrder.subWorkOrders:id,parent_id,workshop,type'])
+            ->get();
+
+        $byWorkshop = [];
+        foreach ($pending as $partsRequest) {
+            $workshop = $this->resolveApprovalWorkshop($partsRequest);
+            $byWorkshop[$workshop] = ($byWorkshop[$workshop] ?? 0) + 1;
+        }
+
+        $supervisorsByDepartment = User::query()
+            ->where('role', 'supervisor')
+            ->where('is_active', true)
+            ->whereNotNull('department')
+            ->where('department', '!=', '')
+            ->orderBy('department')
+            ->orderBy('name')
+            ->get(['name', 'department'])
+            ->groupBy(fn (User $user) => strtolower(trim($user->department ?? '')));
+
+        $breakdown = [];
+        $seenWorkshops = [];
+
+        foreach ($supervisorsByDepartment as $workshop => $supervisors) {
+            $count = $byWorkshop[$workshop] ?? 0;
+            if ($count <= 0) {
+                continue;
+            }
+
+            $department = strtoupper(trim((string) $supervisors->first()->department));
+            $breakdown[] = [
+                'department' => $department,
+                'workshop' => $workshop,
+                'count' => $count,
+                'supervisors' => $supervisors->pluck('name')->values()->all(),
+            ];
+            $seenWorkshops[] = $workshop;
+        }
+
+        foreach ($byWorkshop as $workshop => $count) {
+            if ($count <= 0 || in_array($workshop, $seenWorkshops, true)) {
+                continue;
+            }
+
+            $breakdown[] = [
+                'department' => strtoupper($workshop),
+                'workshop' => $workshop,
+                'count' => $count,
+                'supervisors' => [],
+            ];
+        }
+
+        usort($breakdown, fn (array $a, array $b) => $b['count'] <=> $a['count']);
+
+        return [
+            'count' => $pending->count(),
+            'label' => 'Parts request menunggu persetujuan supervisor',
+            'by_department' => $breakdown,
+        ];
+    }
+
+    private function resolveApprovalWorkshop(PartsRequest $partsRequest): string
+    {
+        $workOrder = $partsRequest->workOrder;
+        if (! $workOrder) {
+            return strtolower(trim((string) ($partsRequest->workshop ?? 'unknown')));
+        }
+
+        $workshop = trim((string) ($workOrder->workshop ?? ''));
+        if ($workshop !== '') {
+            return strtolower($workshop);
+        }
+
+        if ($workOrder->type === 'main') {
+            $subWorkshops = $workOrder->subWorkOrders
+                ->pluck('workshop')
+                ->map(fn ($value) => strtolower(trim((string) $value)))
+                ->filter(fn (string $value) => $value !== '')
+                ->unique()
+                ->values();
+
+            if ($subWorkshops->count() === 1) {
+                return $subWorkshops->first();
+            }
+        }
+
+        return strtolower(trim((string) ($partsRequest->workshop ?? 'unknown')));
     }
 
     public function show(Request $request, PartsRequest $partsRequest)
@@ -125,6 +242,13 @@ class PartsRequestController extends Controller
             return response()->json(['message' => 'Hanya request pending yang dapat diproses supervisor.'], 422);
         }
 
+        if ($denied = $this->denyUnless(
+            $this->canSupervisorApprovePartsRequest($request->user(), $partsRequest),
+            'Anda tidak dapat memproses parts request untuk lokasi/workshop WO ini.'
+        )) {
+            return $denied;
+        }
+
         if ($request->action === 'reject') {
             $partsRequest->update(['status' => 'rejected', 'supervisor_notes' => $request->notes]);
 
@@ -146,6 +270,12 @@ class PartsRequestController extends Controller
     public function logisticAction(Request $request, PartsRequest $partsRequest)
     {
         $request->validate(['action' => 'required|in:check,taken']);
+
+        if ($request->user()->role !== 'logistic') {
+            return response()->json([
+                'message' => 'Hanya role logistic yang dapat memproses parts request.',
+            ], 403);
+        }
 
         if (! in_array($partsRequest->status, ['approved', 'logistic_check'], true)) {
             return response()->json([
@@ -305,11 +435,64 @@ class PartsRequestController extends Controller
     {
         $user = $request->user();
 
-        if (in_array($user->role, ['admin', 'supervisor', 'planner', 'logistic'], true)) {
+        if ($user->canViewAllDepartments()) {
             return true;
         }
 
+        if ($user->role === 'logistic') {
+            return true;
+        }
+
+        if ($user->role === 'mechanic') {
+            return $partsRequest->created_by === $user->id;
+        }
+
+        if ($user->role === 'supervisor') {
+            $partsRequest->loadMissing('workOrder');
+
+            return $partsRequest->workOrder?->isVisibleTo($user) ?? false;
+        }
+
         return $partsRequest->created_by === $user->id;
+    }
+
+    private function shouldScopePartsByWorkOrder(User $user): bool
+    {
+        if ($user->canViewAllDepartments() || $user->role === 'logistic') {
+            return false;
+        }
+
+        return $user->role === 'supervisor'
+            && $user->hasPermission(Permission::PARTS_SUPERVISOR);
+    }
+
+    /**
+     * @param  \Illuminate\Database\Eloquent\Builder<PartsRequest>  $query
+     */
+    private function applyWorkOrderScope($query, User $viewer): void
+    {
+        if ($viewer->canViewAllDepartments()) {
+            return;
+        }
+
+        $query->whereHas('workOrder', function ($woQuery) use ($viewer) {
+            $woQuery->visibleTo($viewer);
+        });
+    }
+
+    private function canSupervisorApprovePartsRequest(User $supervisor, PartsRequest $partsRequest): bool
+    {
+        if (! $supervisor->hasPermission(Permission::PARTS_SUPERVISOR)) {
+            return false;
+        }
+
+        if ($supervisor->canViewAllDepartments()) {
+            return true;
+        }
+
+        $partsRequest->loadMissing('workOrder');
+
+        return $partsRequest->workOrder?->isVisibleTo($supervisor) ?? false;
     }
 
     private function canSubmitPartsRequest(Request $request, PartsRequest $partsRequest): bool

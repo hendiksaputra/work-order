@@ -29,6 +29,44 @@ class UserExcelService
         return (string) SimpleXLSXGen::fromArray($rows, 'Users');
     }
 
+    /** @return list<list<string>> */
+    public function exportRows(?string $search = null, ?string $role = null, ?User $viewer = null): array
+    {
+        $rows = [['Nama', 'Username', 'Email', 'NIK', 'Role', 'Departemen', 'Aktif']];
+
+        $query = User::query()->orderBy('name');
+        if ($viewer) {
+            $query->visibleTo($viewer);
+        }
+
+        if ($search) {
+            $query->where(function ($q) use ($search) {
+                $q->where('name', 'like', "%{$search}%")
+                    ->orWhere('username', 'like', "%{$search}%")
+                    ->orWhere('email', 'like', "%{$search}%")
+                    ->orWhere('employee_id', 'like', "%{$search}%");
+            });
+        }
+
+        if ($role) {
+            $query->where('role', $role);
+        }
+
+        $query->each(function (User $user) use (&$rows) {
+            $rows[] = [
+                $user->name,
+                $user->username ?? '',
+                $user->email,
+                $user->employee_id ?? '',
+                $user->role,
+                $user->department ?? '',
+                $user->is_active ? 'ya' : 'tidak',
+            ];
+        });
+
+        return $rows;
+    }
+
     /**
      * @return array{
      *   imported: int,

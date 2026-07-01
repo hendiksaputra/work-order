@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\PartsRequestController;
 use App\Http\Controllers\Api\ReportController;
 use App\Http\Controllers\Api\RoleController;
 use App\Http\Controllers\Api\UserController;
+use App\Http\Controllers\Api\MechanicActivitySubmissionController;
 use App\Http\Controllers\Api\WorkOrderController;
 use App\Http\Controllers\Api\WorkshopSettingsController;
 use App\Support\Permission;
@@ -45,6 +46,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Permission::WORK_ORDERS_CREATE,
         Permission::WORK_ORDERS_SUB_CREATE,
     ]))->group(function () {
+        Route::get('/work-orders/{workOrder}/preview-sub-wo-number', [WorkOrderController::class, 'previewSubWoNumber']);
         Route::post('/work-orders', [WorkOrderController::class, 'store']);
     });
 
@@ -100,18 +102,39 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/mechanic-activities', [MechanicActivityController::class, 'index']);
     });
 
+    Route::middleware(permissionAny([
+        Permission::MECHANIC_ACTIVITIES_VIEW_OWN,
+        Permission::MECHANIC_ACTIVITIES_VIEW_ALL,
+        Permission::MECHANIC_ACTIVITIES_APPROVE,
+    ]))->group(function () {
+        Route::get('/mechanic-activity-submissions', [MechanicActivitySubmissionController::class, 'index']);
+    });
+
+    Route::middleware(permissionAny([
+        Permission::MECHANIC_ACTIVITIES_VIEW_ALL,
+        Permission::MECHANIC_ACTIVITIES_APPROVE,
+    ]))->group(function () {
+        Route::get('/mechanic-activities/filter-mechanics', [MechanicActivityController::class, 'filterMechanics']);
+    });
+
     Route::middleware('permission:'.Permission::MECHANIC_ACTIVITIES_CREATE)->group(function () {
         Route::post('/mechanic-activities', [MechanicActivityController::class, 'store']);
     });
 
     Route::middleware('permission:'.Permission::MECHANIC_ACTIVITIES_SUBMIT)->group(function () {
         Route::get('/mechanic-activities/draft-count', [MechanicActivityController::class, 'draftCount']);
+        Route::post('/mechanic-activities/bulk-submit', [MechanicActivityController::class, 'bulkSubmit']);
         Route::post('/mechanic-activities/{mechanicActivity}/submit', [MechanicActivityController::class, 'submit']);
+        Route::post('/mechanic-activity-submissions/bulk-submit', [MechanicActivitySubmissionController::class, 'bulkSubmit']);
+        Route::post('/mechanic-activity-submissions/{mechanicActivitySubmission}/submit', [MechanicActivitySubmissionController::class, 'submitOne']);
     });
 
     Route::middleware('permission:'.Permission::MECHANIC_ACTIVITIES_APPROVE)->group(function () {
         Route::get('/mechanic-activities/pending-approval-count', [MechanicActivityController::class, 'pendingApprovalCount']);
+        Route::post('/mechanic-activities/bulk-approve', [MechanicActivityController::class, 'bulkApprove']);
         Route::post('/mechanic-activities/{mechanicActivity}/approve', [MechanicActivityController::class, 'approve']);
+        Route::post('/mechanic-activity-submissions/bulk-approve', [MechanicActivitySubmissionController::class, 'bulkApprove']);
+        Route::post('/mechanic-activity-submissions/{mechanicActivitySubmission}/approve', [MechanicActivitySubmissionController::class, 'approve']);
         Route::get('/overtime-requests/pending-approval-count', [OvertimeRequestController::class, 'pendingApprovalCount']);
         Route::get('/overtime-requests', [OvertimeRequestController::class, 'index']);
         Route::post('/overtime-requests/{overtimeRequest}/approve', [OvertimeRequestController::class, 'approve']);
@@ -143,7 +166,10 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/mechanic-activities/{mechanicActivity}', [MechanicActivityController::class, 'destroy']);
     });
 
-    Route::middleware('permission:'.Permission::PARTS_SUPERVISOR)->group(function () {
+    Route::middleware(permissionAny([
+        Permission::PARTS_SUPERVISOR,
+        Permission::PARTS_VIEW,
+    ]))->group(function () {
         Route::get('/parts-requests/pending-approval-count', [PartsRequestController::class, 'pendingApprovalCount']);
     });
 
@@ -191,6 +217,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/cost', [ReportController::class, 'costReport']);
         Route::get('/work-order-history', [ReportController::class, 'workOrderHistory']);
         Route::get('/mechanic-activity-history', [ReportController::class, 'mechanicActivityHistory']);
+        Route::get('/mechanic-activity-history/export/excel', [ReportController::class, 'exportMechanicActivityHistoryExcel']);
+        Route::get('/mechanic-activity-history/export/pdf', [ReportController::class, 'exportMechanicActivityHistoryPdf']);
         Route::get('/unit-component-history', [ReportController::class, 'unitComponentHistory']);
         Route::get('/delay-analysis', [ReportController::class, 'delayAnalysis']);
         Route::get('/utilization', [ReportController::class, 'utilization']);
@@ -212,6 +240,7 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     Route::middleware('permission:'.Permission::USERS_VIEW)->prefix('users')->group(function () {
+        Route::get('/export', [UserController::class, 'export']);
         Route::get('/', [UserController::class, 'index']);
         Route::get('/{user}', [UserController::class, 'show']);
     });

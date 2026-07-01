@@ -20,24 +20,9 @@ class UserController extends Controller
 
     public function index(Request $request)
     {
-        $query = User::query()->orderBy('name');
+        $query = User::query()->visibleTo($request->user())->orderBy('name');
 
-        if ($search = $request->string('search')->toString()) {
-            $query->where(function ($q) use ($search) {
-                $q->where('name', 'like', "%{$search}%")
-                    ->orWhere('username', 'like', "%{$search}%")
-                    ->orWhere('email', 'like', "%{$search}%")
-                    ->orWhere('employee_id', 'like', "%{$search}%");
-            });
-        }
-
-        if ($role = $request->string('role')->toString()) {
-            $query->where('role', $role);
-        }
-
-        if ($request->has('is_active')) {
-            $query->where('is_active', $request->boolean('is_active'));
-        }
+        $this->applyUserListFilters($query, $request);
 
         return response()->json($query->paginate($request->integer('per_page', 20)));
     }
@@ -59,6 +44,9 @@ class UserController extends Controller
 
         $data['password'] = Hash::make($data['password']);
         $data['is_active'] = $data['is_active'] ?? true;
+        if (! $request->user()->canViewAllDepartments()) {
+            $data['department'] = $request->user()->department;
+        }
         $data['username'] = $this->resolveUsername(
             $data['username'] ?? null,
             $data['name'],
@@ -71,13 +59,21 @@ class UserController extends Controller
         return response()->json($this->formatUser($user), 201);
     }
 
-    public function show(User $user)
+    public function show(Request $request, User $user)
     {
+        if (! $user->isVisibleTo($request->user())) {
+            return response()->json(['message' => 'Pengguna tidak ditemukan.'], 404);
+        }
+
         return response()->json($this->formatUser($user));
     }
 
     public function update(Request $request, User $user)
     {
+        if (! $user->isVisibleTo($request->user())) {
+            return response()->json(['message' => 'Pengguna tidak ditemukan.'], 404);
+        }
+
         $roles = Role::pluck('slug')->all();
 
         $data = $request->validate([
@@ -107,14 +103,22 @@ class UserController extends Controller
             unset($data['password']);
         }
 
+        if (! $request->user()->canViewAllDepartments()) {
+            $data['department'] = $request->user()->department;
+        }
+
         $user->update($data);
 
         return response()->json($this->formatUser($user->fresh()));
     }
 
-    public function destroy(User $user)
+    public function destroy(Request $request, User $user)
     {
-        $result = $this->attemptDeleteUser($user, request()->user()->id);
+        if (! $user->isVisibleTo($request->user())) {
+            return response()->json(['message' => 'Pengguna tidak ditemukan.'], 404);
+        }
+
+        $result = $this->attemptDeleteUser($user, $request->user()->id);
         if ($result['error']) {
             return response()->json(['message' => $result['error']], 422);
         }
@@ -139,6 +143,7 @@ class UserController extends Controller
             $query = $this->bulkDeleteQuery($request);
         } elseif ($request->has('ids') && count($request->input('ids', [])) > 0) {
             $query = User::query()
+                ->visibleTo($request->user())
                 ->whereIn('id', $request->input('ids'))
                 ->where('role', '!=', 'admin');
         } else {
@@ -184,8 +189,20 @@ class UserController extends Controller
     /** @return \Illuminate\Database\Eloquent\Builder<User> */
     private function bulkDeleteQuery(Request $request)
     {
-        $query = User::query()->where('role', '!=', 'admin');
+        $query = User::query()
+            ->visibleTo($request->user())
+            ->where('role', '!=', 'admin');
 
+        $this->applyUserListFilters($query, $request);
+
+        return $query;
+    }
+
+    /**
+     * @param  \Illuminate\Database\Eloquent\Builder<User>  $query
+     */
+    private function applyUserListFilters($query, Request $request): void
+    {
         if ($search = $request->string('search')->toString()) {
             $query->where(function ($q) use ($search) {
                 $q->where('name', 'like', "%{$search}%")
@@ -199,7 +216,9 @@ class UserController extends Controller
             $query->where('role', $role);
         }
 
-        return $query;
+        if ($request->has('is_active')) {
+            $query->where('is_active', $request->boolean('is_active'));
+        }
     }
 
     /**
@@ -227,6 +246,27 @@ class UserController extends Controller
         $user->delete();
 
         return ['error' => null];
+    }
+
+    public function export(Request $request): StreamedResponse
+    {
+        $search = $request->string('search')->toString() ?: null;
+        $role = $request->string('role')->toString() ?: null;
+
+        $content = $this->excel->buildXlsxContent(
+            $this->excel->exportRows($search, $role, $request->user())
+        );
+        $filename = 'users-'.now()->format('Ymd-His').'.xlsx';
+
+        return response()->streamDownload(
+            static function () use ($content) {
+                echo $content;
+            },
+            $filename,
+            [
+                'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            ]
+        );
     }
 
     public function importTemplate(): StreamedResponse

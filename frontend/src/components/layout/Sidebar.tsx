@@ -22,6 +22,9 @@ import type { User } from '@/lib/types';
 import { authApi } from '@/lib/api';
 import { can, Permission } from '@/lib/permissions';
 import type { PermissionName } from '@/lib/permissions';
+import { canViewAllDepartments } from '@/lib/department-scope';
+import { formatPartsPendingBadgeTitle } from '@/lib/parts-pending-summary';
+import type { PartsPendingApprovalSummary } from '@/lib/types';
 
 const nav: { href: string; label: string; icon: typeof LayoutDashboard; permission: PermissionName }[] = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, permission: Permission.DASHBOARD_VIEW },
@@ -48,7 +51,8 @@ const nav: { href: string; label: string; icon: typeof LayoutDashboard; permissi
 
 function getNavBadge(
   href: string,
-  counts: { wo: number; parts: number; activitiesApproval: number; activitiesDraft: number }
+  counts: { wo: number; parts: number; activitiesApproval: number; activitiesDraft: number },
+  partsTitle?: string
 ): { count: number; title: string; ariaLabel: string } | null {
   if (href === '/work-orders' && counts.wo > 0) {
     return {
@@ -74,10 +78,12 @@ function getNavBadge(
     }
   }
   if (href === '/parts' && counts.parts > 0) {
+    const title =
+      partsTitle ?? `${counts.parts} parts request menunggu persetujuan supervisor`;
     return {
       count: counts.parts,
-      title: `${counts.parts} parts request menunggu persetujuan supervisor`,
-      ariaLabel: `${counts.parts} parts request belum disetujui`,
+      title,
+      ariaLabel: title,
     };
   }
   return null;
@@ -98,10 +104,14 @@ export function Sidebar({ user }: { user: User }) {
   const visibleNav = nav.filter((item) => canSeeNavItem(user, item.permission));
   const canApproveWo = can(user, Permission.WORK_ORDERS_APPROVE);
   const canApproveParts = can(user, Permission.PARTS_SUPERVISOR);
+  const canViewParts = can(user, Permission.PARTS_VIEW);
+  const showAllDepartmentsPartsBadge = canViewParts && canViewAllDepartments(user);
+  const canSeePartsPendingBadge = canApproveParts || showAllDepartmentsPartsBadge;
   const canApproveActivities = can(user, Permission.MECHANIC_ACTIVITIES_APPROVE);
   const canSubmitActivities = can(user, Permission.MECHANIC_ACTIVITIES_SUBMIT);
   const [pendingWoCount, setPendingWoCount] = useState(0);
   const [pendingPartsCount, setPendingPartsCount] = useState(0);
+  const [partsPendingTitle, setPartsPendingTitle] = useState<string | undefined>();
   const [pendingActivitiesCount, setPendingActivitiesCount] = useState(0);
   const [draftActivitiesCount, setDraftActivitiesCount] = useState(0);
 
@@ -116,14 +126,23 @@ export function Sidebar({ user }: { user: User }) {
   }, [canApproveWo]);
 
   const loadPendingPartsCount = useCallback(() => {
-    if (!canApproveParts) {
+    if (!canSeePartsPendingBadge) {
       setPendingPartsCount(0);
+      setPartsPendingTitle(undefined);
       return;
     }
-    api<{ count: number }>('/parts-requests/pending-approval-count')
-      .then((res) => setPendingPartsCount(res.count))
-      .catch(() => setPendingPartsCount(0));
-  }, [canApproveParts]);
+    api<PartsPendingApprovalSummary>('/parts-requests/pending-approval-count')
+      .then((res) => {
+        setPendingPartsCount(res.count);
+        setPartsPendingTitle(
+          res.by_department?.length ? formatPartsPendingBadgeTitle(res) : undefined
+        );
+      })
+      .catch(() => {
+        setPendingPartsCount(0);
+        setPartsPendingTitle(undefined);
+      });
+  }, [canSeePartsPendingBadge]);
 
   const loadPendingActivitiesCount = useCallback(() => {
     if (!canApproveActivities) {
@@ -201,12 +220,16 @@ export function Sidebar({ user }: { user: User }) {
         {visibleNav.map((item) => {
           const active = pathname.startsWith(item.href);
           const Icon = item.icon;
-          const navBadge = getNavBadge(item.href, {
-            wo: pendingWoCount,
-            parts: pendingPartsCount,
-            activitiesApproval: pendingActivitiesCount,
-            activitiesDraft: draftActivitiesCount,
-          });
+          const navBadge = getNavBadge(
+            item.href,
+            {
+              wo: pendingWoCount,
+              parts: pendingPartsCount,
+              activitiesApproval: pendingActivitiesCount,
+              activitiesDraft: draftActivitiesCount,
+            },
+            partsPendingTitle
+          );
 
           return (
             <Link

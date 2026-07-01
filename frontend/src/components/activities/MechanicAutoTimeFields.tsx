@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Square } from 'lucide-react';
+import { Play, Square } from 'lucide-react';
 import {
   afternoonStartDelayMinutes,
   calculateWorkHours,
@@ -14,6 +14,7 @@ import {
   overlapsOvertime,
   overtimeMinutes,
   STANDARD_WORK_END,
+  STANDARD_WORK_START,
 } from '@/lib/activity-hours';
 import type { AfternoonResumeState } from '@/lib/mechanic-day-session';
 import { formatLocalTime, todayDateString } from '@/lib/mechanic-day-session';
@@ -37,17 +38,23 @@ function TimeDisplay({ value, placeholder = '--:--' }: { value: string; placehol
 
 export function MechanicAutoTimeFields({
   startTime,
+  plannedStartTime,
+  startTimeStarted,
   endTime,
   endTimeStopped,
   activityDate,
   afternoonResume,
+  onStart,
   onStop,
 }: {
   startTime: string;
+  plannedStartTime: string;
+  startTimeStarted: boolean;
   endTime: string;
   endTimeStopped: boolean;
   activityDate: string;
   afternoonResume?: AfternoonResumeState | null;
+  onStart: () => void;
   onStop: () => void;
 }) {
   const [nowClock, setNowClock] = useState(() => formatLocalTime());
@@ -59,7 +66,6 @@ export function MechanicAutoTimeFields({
 
   const lunchRange = lunchBreakRangeLabel(activityDate);
   const afternoonSession = isAfternoonOnlySession(startTime, activityDate);
-  const previewEnd = endTimeStopped ? endTime : startTime;
   const willStopAtLunch =
     endTimeStopped && endedDuringLunchWithoutResume(startTime, endTime, activityDate);
   const hasLunchBreak =
@@ -91,21 +97,41 @@ export function MechanicAutoTimeFields({
     <>
       <div>
         <label className="text-sm font-medium text-slate-700">Jam Mulai</label>
-        <TimeDisplay value={startTime} />
+        <TimeDisplay value={startTimeStarted ? startTime : ''} />
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onStart}
+            disabled={startTimeStarted}
+            className="inline-flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Play className="h-3.5 w-3.5 fill-current" />
+            Start
+          </button>
+          {startTimeStarted && (
+            <span className="text-xs text-slate-500">
+              Sesi aktif sejak <strong className="text-slate-700">{startTime}</strong>
+            </span>
+          )}
+        </div>
         <p className="mt-1 text-xs text-slate-500">
-          {afternoonLive ? (
+          {!startTimeStarted ? (
+            plannedStartTime === STANDARD_WORK_START ? (
+              <>Tekan <strong>Start</strong> untuk memulai sesi pagi (default pukul {STANDARD_WORK_START})</>
+            ) : (
+              <>Tekan <strong>Start</strong> untuk memulai sesi (rencana pukul {plannedStartTime})</>
+            )
+          ) : afternoonLive ? (
             <>
-              Sesi siang — mulai otomatis pukul {startTime}
+              Sesi siang — mulai pukul {startTime}
               {afternoonDelay > 0 && (
                 <span className="text-amber-700"> (+{afternoonDelay} menit dari jadwal istirahat)</span>
               )}
             </>
-          ) : !endTimeStopped && isToday ? (
-            <>
-              Sesi pagi aktif — jam mulai dari login ({startTime})
-            </>
+          ) : startTime === STANDARD_WORK_START ? (
+            <>Sesi pagi dimulai pukul {STANDARD_WORK_START}</>
           ) : (
-            'Sesi pagi — dari login atau lanjutan sebelumnya'
+            <>Sesi pagi — lanjutan dari aktivitas sebelumnya ({startTime})</>
           )}
         </p>
       </div>
@@ -116,19 +142,26 @@ export function MechanicAutoTimeFields({
           <button
             type="button"
             onClick={onStop}
-            className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700"
+            disabled={!startTimeStarted}
+            className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Square className="h-3.5 w-3.5 fill-current" />
             Stop
           </button>
-          <span className="text-xs text-slate-500">
-            Jam berjalan: <strong className="text-slate-700">{nowClock}</strong>
-          </span>
+          {startTimeStarted && (
+            <span className="text-xs text-slate-500">
+              Jam berjalan: <strong className="text-slate-700">{nowClock}</strong>
+            </span>
+          )}
         </div>
         <p className="mt-1 text-xs text-slate-500">
-          {endTimeStopped
-            ? `Berhenti pukul ${endTime} — tekan Stop lagi jika perlu perbarui, lalu Simpan Aktivitas`
-            : `Tekan Stop saat selesai bekerja (maks. ${STANDARD_WORK_END} tanpa lembur)`}
+          {!startTimeStarted ? (
+            'Tekan Start terlebih dahulu sebelum Stop'
+          ) : endTimeStopped ? (
+            `Berhenti pukul ${endTime} — tekan Stop lagi jika perlu perbarui, lalu Simpan Aktivitas`
+          ) : (
+            `Tekan Stop saat selesai bekerja (maks. ${STANDARD_WORK_END} tanpa lembur)`
+          )}
         </p>
         {endTimeStopped && exceedsStandardWorkEnd(endTime) && (
           <p className="mt-1 text-xs font-medium text-red-700">
@@ -137,7 +170,13 @@ export function MechanicAutoTimeFields({
         )}
       </div>
       <div className="col-span-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-        {!endTimeStopped ? (
+        {!startTimeStarted ? (
+          <p>
+            Tekan <strong>Start</strong> untuk memulai sesi kerja, lalu <strong>Stop</strong> saat
+            selesai, dan <strong>Simpan Aktivitas</strong>. Jam istirahat ({lunchRange}) dipisah
+            otomatis saat simpan.
+          </p>
+        ) : !endTimeStopped ? (
           <p>
             Sesi kerja aktif. Tekan <strong>Stop</strong> untuk mencatat jam selesai, lalu{' '}
             <strong>Simpan Aktivitas</strong>. Jam istirahat ({lunchRange}) tetap dipisah otomatis

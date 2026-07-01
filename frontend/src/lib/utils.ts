@@ -40,3 +40,11 @@ export function formatDate(d?: string | null) {
     year: 'numeric',
   });
 }
+
+/** Jam desimal (1.3 = 78 mnt) → tampilan jam.menit, mis. 1.18 h */
+export function formatDecimalHours(hours?: number | string | null): string {
+  const totalMinutes = Math.round((Number(hours) || 0) * 60);
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return `${h}.${String(m).padStart(2, '0')} h`;
+}

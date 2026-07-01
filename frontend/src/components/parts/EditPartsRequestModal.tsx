@@ -1,9 +1,11 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { PartsRequestItemsEditor } from '@/components/parts/PartsRequestItemsEditor';
+import { PartsWorkOrderSearch } from '@/components/parts/PartsWorkOrderSearch';
+import { formatWorkshopLabel, resolveWorkshopFromWorkOrder } from '@/lib/parts-workshop';
 import type { PartsRequest, PartsRequestItem, WorkOrder } from '@/lib/types';
 
 const emptyItem = (): PartsRequestItem => ({
@@ -32,6 +34,14 @@ export function EditPartsRequestModal({ request, woList, onClose, onSaved }: Pro
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
+  const workOrders = useMemo(() => {
+    const wo = request.work_order;
+    if (wo && !woList.some((w) => w.id === wo.id)) {
+      return [wo, ...woList];
+    }
+    return woList;
+  }, [woList, request.work_order]);
+
   useEffect(() => {
     setForm({
       work_order_id: String(request.work_order_id),
@@ -44,6 +54,16 @@ export function EditPartsRequestModal({ request, woList, onClose, onSaved }: Pro
 
   const ic =
     'w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm focus:border-orange-500 focus:outline-none focus:ring-2 focus:ring-orange-200';
+  const icReadonly = `${ic} cursor-default bg-slate-50 text-slate-700`;
+
+  const handleWorkOrderChange = (work_order_id: string) => {
+    const wo = workOrders.find((w) => String(w.id) === work_order_id);
+    setForm((prev) => ({
+      ...prev,
+      work_order_id,
+      workshop: resolveWorkshopFromWorkOrder(wo),
+    }));
+  };
 
   const addItem = () => {
     setForm({ ...form, items: [...form.items, emptyItem()] });
@@ -51,6 +71,10 @@ export function EditPartsRequestModal({ request, woList, onClose, onSaved }: Pro
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!form.workshop) {
+      setError('Workshop tidak terdeteksi dari WO yang dipilih.');
+      return;
+    }
     setSaving(true);
     setError('');
     try {
@@ -116,31 +140,24 @@ export function EditPartsRequestModal({ request, woList, onClose, onSaved }: Pro
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="text-sm font-medium text-slate-700">Work Order</label>
-                <select
-                  className={ic}
+                <PartsWorkOrderSearch
+                  workOrders={workOrders}
                   value={form.work_order_id}
-                  onChange={(e) => setForm({ ...form, work_order_id: e.target.value })}
+                  onChange={handleWorkOrderChange}
+                  wrapperClassName={`${ic} mt-1 flex items-center focus-within:border-orange-500 focus-within:ring-2 focus-within:ring-orange-200`}
                   required
-                >
-                  <option value="">Pilih WO</option>
-                  {woList.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.wo_number} — {w.title}
-                    </option>
-                  ))}
-                </select>
+                />
               </div>
               <div>
                 <label className="text-sm font-medium text-slate-700">Workshop</label>
-                <select
-                  className={ic}
-                  value={form.workshop}
-                  onChange={(e) => setForm({ ...form, workshop: e.target.value })}
-                >
-                  <option value="rebuild">Rebuild</option>
-                  <option value="fabrication">Fabrication</option>
-                  <option value="support">Support</option>
-                </select>
+                <input
+                  type="text"
+                  readOnly
+                  className={`${icReadonly} mt-1`}
+                  value={formatWorkshopLabel(form.workshop)}
+                  placeholder="Otomatis dari WO"
+                  tabIndex={-1}
+                />
               </div>
               <div className="col-span-2">
                 <label className="text-sm font-medium text-slate-700">Catatan (opsional)</label>

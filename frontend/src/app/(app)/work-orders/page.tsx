@@ -39,6 +39,7 @@ import {
   workOrderSubmitSuccessMessage,
 } from '@/lib/work-order-messages';
 import { consumeWorkOrderFlash } from '@/lib/wo-flash';
+import { workOrderLocationLabel } from '@/lib/work-order-location';
 
 export default function WorkOrdersPage() {
   const { user, can } = useAuth();
@@ -52,6 +53,7 @@ export default function WorkOrdersPage() {
   const canCreateAny = canCreateMain || canCreateSub;
   const canSubmitPerm = can(Permission.WORK_ORDERS_SUBMIT);
   const canApprovePerm = can(Permission.WORK_ORDERS_APPROVE);
+  const seesAllDepartments = user?.role === 'admin' || user?.role === 'planner';
   const [data, setData] = useState<Paginated<WorkOrder> | null>(null);
   const [search, setSearch] = useState('');
   const [type, setType] = useState('');
@@ -171,6 +173,14 @@ export default function WorkOrdersPage() {
           ) : undefined
         }
       />
+
+      {!seesAllDepartments && (
+        <p className="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+          Menampilkan Work Order pada departemen/lokasi:{' '}
+          <strong>{user?.department?.trim() || 'belum diatur'}</strong>. Role Admin dan Planner dapat
+          melihat seluruh departemen.
+        </p>
+      )}
 
       <CreateWorkOrderModal
         open={createOpen}
@@ -384,6 +394,7 @@ function WoTable({
             <th className="px-4 py-3">No WO</th>
             <th className="px-4 py-3">Judul</th>
             <th className="px-4 py-3">Tipe</th>
+            <th className="px-4 py-3">Departemen / Lokasi</th>
             <th className="px-4 py-3">Kategori/Workshop</th>
             <th className="px-4 py-3">Man Power</th>
             <th className="px-4 py-3">Est. Jam</th>
@@ -398,7 +409,7 @@ function WoTable({
           {visibleRows.length === 0 ? (
             <tr>
               <td
-                colSpan={showActionsColumn ? 12 : 11}
+                colSpan={showActionsColumn ? 13 : 12}
                 className="px-4 py-12 text-center text-slate-400"
               >
                 Tidak ada data
@@ -435,7 +446,7 @@ function WoTable({
                 wo.type === 'main' && subWorkOrders.length > 0;
               const mainBlockedBySubs = showHierarchy && subWorkOrders.length > 0;
 
-              const colSpan = showActionsColumn ? 12 : 11;
+              const colSpan = showActionsColumn ? 13 : 12;
               const isExpanded = expandedId === wo.id;
               const isHierarchyExpanded = hierarchyExpandedIds.has(wo.id);
 
@@ -455,6 +466,7 @@ function WoTable({
                     </td>
                     <td className="px-4 py-3">{wo.title}</td>
                     <td className="px-4 py-3 capitalize">{wo.type}</td>
+                    <td className="px-4 py-3 text-slate-600">{workOrderLocationLabel(wo)}</td>
                     <td className="px-4 py-3 capitalize">
                       {wo.type === 'main' ? wo.main_category : wo.workshop}
                     </td>

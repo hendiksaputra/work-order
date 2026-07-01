@@ -7,10 +7,12 @@ use App\Models\AppSetting;
 use App\Models\MechanicActivity;
 use App\Models\PartsRequestItem;
 use App\Models\WorkOrder;
+use App\Services\MechanicActivityHistoryExportService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class ReportController extends Controller
 {
@@ -250,6 +252,70 @@ class ReportController extends Controller
 
     public function mechanicActivityHistory(Request $request)
     {
+        $query = $this->mechanicActivityHistoryQuery($request);
+        $totalHoursSum = round(
+            (float) (clone $query)->where('status', '!=', 'rejected')->sum('total_hours'),
+            2
+        );
+        $paginator = $query->paginate($request->integer('per_page', 25));
+
+        return response()->json([
+            ...$paginator->toArray(),
+            'total_hours_sum' => $totalHoursSum,
+        ]);
+    }
+
+    public function exportMechanicActivityHistoryExcel(Request $request): StreamedResponse
+    {
+        $activities = $this->mechanicActivityHistoryQuery($request)
+            ->limit(MechanicActivityHistoryExportService::EXPORT_LIMIT)
+            ->get();
+
+        $content = app(MechanicActivityHistoryExportService::class)->buildXlsxContent($activities);
+        $filename = 'mechanic-activity-history-'.now()->format('Ymd-His').'.xlsx';
+
+        return response()->streamDownload(
+            static function () use ($content) {
+                echo $content;
+            },
+            $filename,
+            [
+                'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            ]
+        );
+    }
+
+    public function exportMechanicActivityHistoryPdf(Request $request): StreamedResponse
+    {
+        $activities = $this->mechanicActivityHistoryQuery($request)
+            ->limit(MechanicActivityHistoryExportService::EXPORT_LIMIT)
+            ->get();
+
+        $content = app(MechanicActivityHistoryExportService::class)->buildPdfContent(
+            $activities,
+            [
+                'title' => 'Riwayat Aktivitas Mekanik',
+                'filters' => $this->mechanicActivityHistoryFilterSummary($request),
+                'generated_at' => now()->format('d/m/Y H:i'),
+            ]
+        );
+
+        $filename = 'mechanic-activity-history-'.now()->format('Ymd-His').'.pdf';
+
+        return response()->streamDownload(
+            static function () use ($content) {
+                echo $content;
+            },
+            $filename,
+            [
+                'Content-Type' => 'application/pdf',
+            ]
+        );
+    }
+
+    /** @return Builder<MechanicActivity> */
+    private function mechanicActivityHistoryQuery(Request $request): Builder
+    {
         $query = MechanicActivity::with(['user', 'workOrder', 'activityType'])
             ->latest('activity_date')
             ->latest('id');
@@ -269,8 +335,49 @@ class ReportController extends Controller
         if ($request->filled('work_order_id')) {
             $query->where('work_order_id', $request->integer('work_order_id'));
         }
+        if ($request->filled('search')) {
+            $search = $request->string('search')->trim();
+            if ($search !== '') {
+                $query->whereHas('user', function ($userQuery) use ($search) {
+                    $userQuery->where(function ($inner) use ($search) {
+                        $inner->where('name', 'like', "%{$search}%")
+                            ->orWhere('username', 'like', "%{$search}%")
+                            ->orWhere('employee_id', 'like', "%{$search}%");
+                    });
+                });
+            }
+        }
+        if ($request->filled('date_from')) {
+            $query->whereDate('activity_date', '>=', $request->date('date_from'));
+        }
+        if ($request->filled('date_to')) {
+            $query->whereDate('activity_date', '<=', $request->date('date_to'));
+        }
 
-        return response()->json($query->paginate($request->integer('per_page', 25)));
+        return $query;
+    }
+
+    private function mechanicActivityHistoryFilterSummary(Request $request): string
+    {
+        $parts = [];
+
+        if ($request->filled('search')) {
+            $parts[] = 'Mekanik: '.$request->string('search')->trim();
+        }
+        if ($request->filled('date_from')) {
+            $parts[] = 'Dari: '.$request->date('date_from')->format('d/m/Y');
+        }
+        if ($request->filled('date_to')) {
+            $parts[] = 'Sampai: '.$request->date('date_to')->format('d/m/Y');
+        }
+        if ($request->filled('status')) {
+            $parts[] = 'Status: '.$request->status;
+        }
+        if ($request->filled('category')) {
+            $parts[] = 'Kategori: '.$request->category;
+        }
+
+        return $parts === [] ? 'Semua data' : implode(' · ', $parts);
     }
 
     public function unitComponentHistory(Request $request)

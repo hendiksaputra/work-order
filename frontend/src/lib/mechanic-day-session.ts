@@ -1,4 +1,9 @@
-import { endedDuringLunchWithoutResume, lunchBreakEnd, timeToMinutes } from '@/lib/activity-hours';
+import {
+  endedDuringLunchWithoutResume,
+  lunchBreakEnd,
+  STANDARD_WORK_START,
+  timeToMinutes,
+} from '@/lib/activity-hours';
 
 const STORAGE_PREFIX = 'wo_mechanic_login';
 const SESSION_START_PREFIX = 'wo_mechanic_session_start';
@@ -158,7 +163,6 @@ export function getAfternoonResumeState(
 export function resolveActivityStartTime(
   userId: number,
   activityDate: string,
-  loginTime: string | null,
   now = new Date()
 ): string | null {
   if (isAfternoonSessionLive(userId, activityDate, now)) {
@@ -179,11 +183,7 @@ export function resolveActivityStartTime(
     return sessionStart;
   }
 
-  if (loginTime) {
-    return loginTime;
-  }
-
-  return activityDate === todayDateString(now) ? formatLocalTime(now) : '08:00';
+  return STANDARD_WORK_START;
 }
 
 type ActivityForSync = {

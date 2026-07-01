@@ -6,7 +6,9 @@ use App\Http\Controllers\Concerns\AuthorizesRequests;
 use App\Http\Controllers\Controller;
 use App\Models\ActivityType;
 use App\Models\MechanicActivity;
+use App\Models\MechanicActivitySubmission;
 use App\Models\OvertimeRequest;
+use App\Models\User;
 use App\Models\WorkOrder;
 use App\Support\Permission;
 use App\Support\WorkshopSchedule;
@@ -18,7 +20,7 @@ class MechanicActivityController extends Controller
 
     public function index(Request $request)
     {
-        $query = MechanicActivity::with(['user', 'workOrder', 'activityType', 'approver'])
+        $query = MechanicActivity::with(['user', 'workOrder', 'activityType', 'approver', 'submission'])
             ->latest('activity_date')
             ->latest('id');
 
@@ -26,7 +28,7 @@ class MechanicActivityController extends Controller
         $workOrderId = $request->filled('work_order_id') ? (int) $request->work_order_id : null;
 
         if (! $viewAll) {
-            if ($workOrderId && $this->isWorkOrderEligibleForTeamActivityView($workOrderId)) {
+            if ($workOrderId && $this->isWorkOrderEligibleForTeamActivityView($workOrderId, $request->user())) {
                 $query->where('work_order_id', $workOrderId);
             } else {
                 $query->where('user_id', $request->user()->id);
@@ -42,30 +44,73 @@ class MechanicActivityController extends Controller
             $query->where('status', $request->status);
         }
 
+        if ($request->filled('user_id')) {
+            $query->where('user_id', $request->integer('user_id'));
+        }
+
+        if ($request->filled('search')) {
+            $search = $request->string('search')->trim();
+            if ($search !== '') {
+                $query->whereHas('user', function ($userQuery) use ($search) {
+                    $userQuery->where(function ($inner) use ($search) {
+                        $inner->where('name', 'like', "%{$search}%")
+                            ->orWhere('username', 'like', "%{$search}%")
+                            ->orWhere('employee_id', 'like', "%{$search}%");
+                    });
+                });
+            }
+        }
+
+        if ($request->filled('activity_date')) {
+            $query->whereDate('activity_date', $request->activity_date);
+        }
+
+        if ($request->filled('date_from')) {
+            $query->whereDate('activity_date', '>=', $request->date('date_from'));
+        }
+
+        if ($request->filled('date_to')) {
+            $query->whereDate('activity_date', '<=', $request->date('date_to'));
+        }
+
         return response()->json($query->paginate($request->integer('per_page', 20)));
     }
 
-    public function pendingApprovalCount()
+    public function filterMechanics(Request $request)
     {
-        $count = MechanicActivity::where('status', 'pending_approval')->count();
+        $query = User::query()
+            ->where('role', 'mechanic')
+            ->where('is_active', true)
+            ->orderBy('name');
 
-        return response()->json([
-            'count' => $count,
-            'label' => 'Aktivitas mekanik menunggu persetujuan supervisor',
-        ]);
+        if (! $request->user()->canViewAllDepartments()) {
+            $query->visibleTo($request->user());
+        }
+
+        if ($request->filled('search')) {
+            $search = $request->string('search')->trim();
+            if ($search !== '') {
+                $query->where(function ($inner) use ($search) {
+                    $inner->where('name', 'like', "%{$search}%")
+                        ->orWhere('username', 'like', "%{$search}%")
+                        ->orWhere('employee_id', 'like', "%{$search}%");
+                });
+            }
+        }
+
+        return response()->json(
+            $query->get(['id', 'name', 'employee_id', 'department'])
+        );
+    }
+
+    public function pendingApprovalCount(Request $request)
+    {
+        return app(MechanicActivitySubmissionController::class)->pendingApprovalCount($request);
     }
 
     public function draftCount(Request $request)
     {
-        $count = MechanicActivity::query()
-            ->where('user_id', $request->user()->id)
-            ->where('status', 'draft')
-            ->count();
-
-        return response()->json([
-            'count' => $count,
-            'label' => 'Aktivitas draft belum diajukan ke supervisor',
-        ]);
+        return app(MechanicActivitySubmissionController::class)->draftDayCount($request);
     }
 
     public function store(Request $request)
@@ -92,11 +137,8 @@ class MechanicActivityController extends Controller
         }
 
         if ($data['mode'] === 'working' && $data['work_order_id']) {
-            $wo = \App\Models\WorkOrder::find($data['work_order_id']);
-            if ($wo && in_array($wo->status, ['closed', 'rejected', 'draft', 'pending_supervisor'], true)) {
-                return response()->json([
-                    'message' => 'WO harus sudah disetujui supervisor sebelum aktivitas working dicatat.',
-                ], 422);
+            if ($denied = $this->denyUnlessWorkingWorkOrderEligible($request, (int) $data['work_order_id'])) {
+                return $denied;
             }
         }
 
@@ -187,7 +229,11 @@ class MechanicActivityController extends Controller
         $primary = collect($created)->first(fn ($a) => $a->mode === $data['mode'])
             ?? $created[0];
 
-        return response()->json($primary->load(['activityType', 'workOrder', 'user']), 201);
+        foreach ($created as $activity) {
+            MechanicActivitySubmissionController::attachActivity($activity);
+        }
+
+        return response()->json($primary->load(['activityType', 'workOrder', 'user', 'submission']), 201);
     }
 
     public function submit(Request $request, MechanicActivity $mechanicActivity)
@@ -199,43 +245,62 @@ class MechanicActivityController extends Controller
             return $denied;
         }
 
-        if ($mechanicActivity->status !== 'draft') {
-            return response()->json(['message' => 'Hanya aktivitas draft yang dapat diajukan.'], 422);
-        }
+        $submission = $this->resolveSubmissionForActivity($mechanicActivity);
 
-        $mechanicActivity->update(['status' => 'pending_approval']);
+        return app(MechanicActivitySubmissionController::class)->submitOne($request, $submission);
+    }
 
-        return response()->json($mechanicActivity->fresh());
+    public function bulkSubmit(Request $request)
+    {
+        return app(MechanicActivitySubmissionController::class)->bulkSubmit($request);
     }
 
     public function approve(Request $request, MechanicActivity $mechanicActivity)
     {
         $request->validate([
             'action' => 'required|in:approve,reject',
-            'notes' => 'nullable|string',
+            'notes' => 'required_if:action,reject|nullable|string|min:3|max:2000',
         ]);
 
-        if ($request->action === 'reject') {
-            $mechanicActivity->update([
-                'status' => 'rejected',
-                'supervisor_notes' => $request->notes,
+        if ($mechanicActivity->status !== 'pending_approval') {
+            return response()->json(['message' => 'Hanya aktivitas menunggu persetujuan yang dapat diproses.'], 422);
+        }
+
+        if (! $this->canSupervisorApproveActivity($request->user(), $mechanicActivity)) {
+            return response()->json(['message' => 'Aktivitas tidak ditemukan.'], 404);
+        }
+
+        $submission = $this->resolveSubmissionForActivity($mechanicActivity);
+
+        $this->applyActivityApprovalDecision(
+            $mechanicActivity,
+            $request->action,
+            $request->user(),
+            $request->notes
+        );
+
+        if ($request->action === 'approve' && $mechanicActivity->work_order_id) {
+            WorkOrder::find($mechanicActivity->work_order_id)?->refreshWorkDetails();
+        }
+
+        $submission->refreshTotals();
+        $submission->syncStatusFromActivities($request->user()->id);
+
+        if ($submission->fresh()->status === 'approved' && ! $submission->approved_by) {
+            $submission->update([
+                'approved_by' => $request->user()->id,
+                'approved_at' => now(),
             ]);
-
-            return response()->json($mechanicActivity->fresh());
         }
 
-        $mechanicActivity->update([
-            'status' => 'approved',
-            'approved_by' => $request->user()->id,
-            'approved_at' => now(),
-            'supervisor_notes' => $request->notes,
-        ]);
+        return response()->json(
+            $mechanicActivity->fresh()->load(['activityType', 'workOrder', 'user', 'submission'])
+        );
+    }
 
-        if ($mechanicActivity->work_order_id) {
-            $mechanicActivity->workOrder?->refreshWorkDetails();
-        }
-
-        return response()->json($mechanicActivity->fresh()->load(['activityType', 'workOrder', 'user']));
+    public function bulkApprove(Request $request)
+    {
+        return app(MechanicActivitySubmissionController::class)->bulkApprove($request);
     }
 
     public function update(Request $request, MechanicActivity $mechanicActivity)
@@ -269,11 +334,8 @@ class MechanicActivityController extends Controller
         }
 
         if ($data['mode'] === 'working' && $data['work_order_id']) {
-            $wo = \App\Models\WorkOrder::find($data['work_order_id']);
-            if ($wo && in_array($wo->status, ['closed', 'rejected', 'draft', 'pending_supervisor'], true)) {
-                return response()->json([
-                    'message' => 'WO harus sudah disetujui supervisor sebelum aktivitas working dicatat.',
-                ], 422);
+            if ($denied = $this->denyUnlessWorkingWorkOrderEligible($request, (int) $data['work_order_id'])) {
+                return $denied;
             }
         }
 
@@ -325,8 +387,17 @@ class MechanicActivityController extends Controller
 
         $wasApproved = $mechanicActivity->status === 'approved';
         $workOrderId = $mechanicActivity->work_order_id;
+        $submission = $mechanicActivity->submission;
 
         $mechanicActivity->delete();
+
+        if ($submission) {
+            if ($submission->activities()->count() === 0) {
+                $submission->delete();
+            } else {
+                $submission->refreshTotals();
+            }
+        }
 
         if ($workOrderId) {
             $workOrder = \App\Models\WorkOrder::find($workOrderId);
@@ -346,6 +417,26 @@ class MechanicActivityController extends Controller
         return response()->json(
             ActivityType::where('is_active', true)->orderBy('category')->orderBy('name')->get()
         );
+    }
+
+    private function resolveSubmissionForActivity(MechanicActivity $activity): MechanicActivitySubmission
+    {
+        if ($activity->submission_id) {
+            return $activity->submission ?? MechanicActivitySubmission::findOrFail($activity->submission_id);
+        }
+
+        $submission = MechanicActivitySubmission::firstOrCreate(
+            [
+                'user_id' => $activity->user_id,
+                'activity_date' => $activity->activity_date,
+            ],
+            ['status' => $activity->status === 'pending_approval' ? 'pending_approval' : 'draft']
+        );
+
+        $activity->update(['submission_id' => $submission->id]);
+        $submission->refreshTotals();
+
+        return $submission->fresh();
     }
 
     private function istirahatActivityTypeId(): int
@@ -384,7 +475,7 @@ class MechanicActivityController extends Controller
     }
 
     /** Sub WO yang sudah disetujui — mekanik boleh lihat aktivitas tim pada WO yang sama. */
-    private function isWorkOrderEligibleForTeamActivityView(int $workOrderId): bool
+    private function isWorkOrderEligibleForTeamActivityView(int $workOrderId, User $viewer): bool
     {
         $wo = WorkOrder::find($workOrderId);
 
@@ -392,7 +483,101 @@ class MechanicActivityController extends Controller
             return false;
         }
 
-        return ! in_array($wo->status, ['closed', 'rejected', 'draft', 'pending_supervisor'], true);
+        if (! $wo->isVisibleTo($viewer)) {
+            return false;
+        }
+
+        return ! in_array($wo->status, WorkOrder::ACTIVITY_INELIGIBLE_STATUSES, true);
+    }
+
+    private function denyUnlessWorkingWorkOrderEligible(Request $request, int $workOrderId)
+    {
+        $wo = WorkOrder::find($workOrderId);
+
+        if (! $wo) {
+            return response()->json(['message' => 'Work Order tidak ditemukan.'], 404);
+        }
+
+        if (! $wo->isVisibleTo($request->user())) {
+            return response()->json(['message' => 'Work Order tidak ditemukan.'], 404);
+        }
+
+        if (in_array($wo->status, WorkOrder::ACTIVITY_INELIGIBLE_STATUSES, true)) {
+            return response()->json([
+                'message' => 'Sub WO harus sudah disetujui supervisor sebelum aktivitas working dicatat.',
+            ], 422);
+        }
+
+        return null;
+    }
+
+    private function canSupervisorApproveActivity(User $supervisor, MechanicActivity $activity): bool
+    {
+        if ($supervisor->canViewAllDepartments()) {
+            return true;
+        }
+
+        if (! $activity->work_order_id) {
+            return true;
+        }
+
+        $workOrder = $activity->relationLoaded('workOrder')
+            ? $activity->workOrder
+            : WorkOrder::find($activity->work_order_id);
+
+        return $workOrder?->isVisibleTo($supervisor) ?? false;
+    }
+
+    /**
+     * @param  \Illuminate\Database\Eloquent\Builder<MechanicActivity>  $query
+     */
+    private function applyApprovalLocationScope($query, User $viewer): void
+    {
+        if ($viewer->canViewAllDepartments()) {
+            return;
+        }
+
+        $department = trim((string) ($viewer->department ?? ''));
+
+        $query->where(function ($outer) use ($department) {
+            $outer->whereNull('work_order_id')
+                ->orWhereHas('workOrder', function ($workOrderQuery) use ($department) {
+                    if ($department === '') {
+                        $workOrderQuery->where(function ($inner) {
+                            $inner->whereNull('workshop')->orWhere('workshop', '');
+                        });
+
+                        return;
+                    }
+
+                    $workOrderQuery->whereRaw('LOWER(workshop) = ?', [strtolower($department)]);
+                });
+        });
+    }
+
+    private function applyActivityApprovalDecision(
+        MechanicActivity $activity,
+        string $action,
+        User $approver,
+        ?string $notes
+    ): void {
+        if ($action === 'reject') {
+            $activity->update([
+                'status' => 'rejected',
+                'supervisor_notes' => $notes,
+                'approved_by' => null,
+                'approved_at' => null,
+            ]);
+
+            return;
+        }
+
+        $activity->update([
+            'status' => 'approved',
+            'approved_by' => $approver->id,
+            'approved_at' => now(),
+            'supervisor_notes' => $notes,
+        ]);
     }
 
     private function canManageActivity(Request $request, MechanicActivity $mechanicActivity): bool

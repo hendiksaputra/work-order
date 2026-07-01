@@ -20,6 +20,7 @@ export interface WorkOrder {
   parent_id?: number;
   main_category?: 'component' | 'unit' | 'other';
   workshop?: 'rebuild' | 'fabrication' | 'support';
+  department?: string;
   title: string;
   description?: string;
   component_name?: string;
@@ -34,6 +35,7 @@ export interface WorkOrder {
   estimated_hours: number;
   target_hours?: number;
   actual_hours: number;
+  logged_hours_sum?: number;
   material_cost: number;
   work_details?: string;
   supervisor_notes?: string;
@@ -91,6 +93,7 @@ export interface OvertimeRequestStatus {
 export interface MechanicActivity {
   id: number;
   user_id: number;
+  submission_id?: number;
   work_order_id?: number;
   activity_type_id: number;
   mode: 'working' | 'standby';
@@ -103,6 +106,21 @@ export interface MechanicActivity {
   user?: User;
   work_order?: WorkOrder;
   activity_type?: ActivityType;
+  submission?: MechanicActivitySubmission;
+}
+
+export interface MechanicActivitySubmission {
+  id: number;
+  user_id: number;
+  activity_date: string;
+  status: string;
+  activities_count: number;
+  total_hours: number;
+  submitted_at?: string;
+  approved_at?: string;
+  supervisor_notes?: string;
+  user?: User;
+  activities?: MechanicActivity[];
 }
 
 export interface PartsRequestItem {
@@ -124,11 +142,28 @@ export interface PartsRequest {
   workshop: string;
   status: string;
   notes?: string;
+  supervisor_notes?: string;
   created_by?: number;
+  approved_by?: number;
+  logistic_by?: number;
+  approved_at?: string;
   creator?: User;
+  approver?: User;
+  logistic_user?: User;
   work_order?: WorkOrder;
   items: PartsRequestItem[];
   created_at: string;
+}
+
+export interface PartsPendingApprovalSummary {
+  count: number;
+  label?: string;
+  by_department?: {
+    department: string;
+    workshop: string;
+    count: number;
+    supervisors: string[];
+  }[];
 }
 
 export interface Paginated<T> {
@@ -137,6 +172,7 @@ export interface Paginated<T> {
   last_page: number;
   total: number;
   per_page?: number;
+  total_hours_sum?: number;
 }
 
 export interface RoleRecord {

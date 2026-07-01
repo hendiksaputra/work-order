@@ -1,6 +1,7 @@
 'use client';
 
 import type { WorkOrder } from '@/lib/types';
+import { formatWorkshopType } from '@/lib/work-order-location';
 
 export function filterSubWorkOrdersByMain(
   subList: WorkOrder[],
@@ -82,6 +83,7 @@ export function MechanicActivityWoFields({
           {filteredSubs.map((w) => (
             <option key={w.id} value={w.id}>
               {w.wo_number} — {w.title}
+              {w.workshop ? ` (${formatWorkshopType(w.workshop)})` : ''}
             </option>
           ))}
         </select>

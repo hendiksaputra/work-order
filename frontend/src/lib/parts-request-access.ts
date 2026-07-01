@@ -1,4 +1,5 @@
 import type { PartsRequest, User } from '@/lib/types';
+import { isWorkOrderVisibleToUser } from '@/lib/department-scope';
 
 const editableStatuses = ['draft', 'rejected'] as const;
 
@@ -38,9 +39,14 @@ export function canDeletePartsRequest(
 
 export function canSupervisorApprovePartsRequest(
   request: PartsRequest,
+  user: User | null | undefined,
   hasSupervisorPermission: boolean
 ): boolean {
-  return hasSupervisorPermission && request.status === 'pending_approval';
+  if (!hasSupervisorPermission || request.status !== 'pending_approval') {
+    return false;
+  }
+
+  return isWorkOrderVisibleToUser(request.work_order, user);
 }
 
 const submittableStatuses = ['draft', 'rejected'] as const;
@@ -58,4 +64,27 @@ export function canSubmitPartsRequest(
     return true;
   }
   return request.created_by === user.id;
+}
+
+function isLogisticUser(user: User | null | undefined, hasLogisticPermission: boolean): boolean {
+  return Boolean(user && hasLogisticPermission && user.role === 'logistic');
+}
+
+export function canLogisticCheckPartsRequest(
+  request: PartsRequest,
+  user: User | null | undefined,
+  hasLogisticPermission: boolean
+): boolean {
+  return isLogisticUser(user, hasLogisticPermission) && request.status === 'approved';
+}
+
+export function canLogisticTakenPartsRequest(
+  request: PartsRequest,
+  user: User | null | undefined,
+  hasLogisticPermission: boolean
+): boolean {
+  return (
+    isLogisticUser(user, hasLogisticPermission) &&
+    ['approved', 'logistic_check'].includes(request.status)
+  );
 }

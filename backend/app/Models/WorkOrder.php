@@ -8,8 +8,16 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class WorkOrder extends Model
 {
+    /** Status WO/Sub WO yang belum boleh dipakai untuk aktivitas mekanik. */
+    public const ACTIVITY_INELIGIBLE_STATUSES = [
+        'draft',
+        'pending_supervisor',
+        'rejected',
+        'closed',
+    ];
+
     protected $fillable = [
-        'wo_number', 'type', 'parent_id', 'main_category', 'workshop',
+        'wo_number', 'type', 'parent_id', 'main_category', 'workshop', 'department',
         'title', 'description', 'component_name', 'component_serial',
         'unit_model', 'unit_number', 'location', 'status',
         'operational_status', 'operational_status_notes',
@@ -45,6 +53,88 @@ class WorkOrder extends Model
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function isVisibleTo(User $viewer): bool
+    {
+        if ($viewer->canViewAllDepartments()) {
+            return true;
+        }
+
+        $department = trim((string) ($viewer->department ?? ''));
+
+        if ($this->locationMatches($department)) {
+            return true;
+        }
+
+        if ($this->type !== 'main') {
+            return false;
+        }
+
+        return $this->subWorkOrders()
+            ->where(function ($query) use ($department) {
+                self::applyWorkshopLocationFilter($query, $department);
+            })
+            ->exists();
+    }
+
+    /**
+     * @param  \Illuminate\Database\Eloquent\Builder<WorkOrder>  $query
+     */
+    public function scopeVisibleTo($query, User $viewer): void
+    {
+        if ($viewer->canViewAllDepartments()) {
+            return;
+        }
+
+        $department = trim((string) ($viewer->department ?? ''));
+
+        $query->where(function ($outer) use ($department) {
+            self::applyWorkshopLocationFilter($outer, $department);
+
+            $outer->orWhere(function ($mainQuery) use ($department) {
+                $mainQuery
+                    ->where('type', 'main')
+                    ->whereHas('subWorkOrders', function ($subQuery) use ($department) {
+                        self::applyWorkshopLocationFilter($subQuery, $department);
+                    });
+            });
+        });
+    }
+
+    /**
+     * @param  \Illuminate\Database\Eloquent\Builder<WorkOrder>  $query
+     */
+    private static function applyWorkshopLocationFilter($query, string $department): void
+    {
+        if ($department === '') {
+            $query->where(function ($inner) {
+                $inner->whereNull('workshop')->orWhere('workshop', '');
+            });
+
+            return;
+        }
+
+        $query->whereRaw('LOWER(workshop) = ?', [strtolower($department)]);
+    }
+
+    private function locationMatches(string $department): bool
+    {
+        $workshop = trim((string) ($this->workshop ?? ''));
+
+        if ($workshop === '') {
+            return $department === '';
+        }
+
+        return strtolower($workshop) === strtolower($department);
+    }
+
+    /**
+     * @param  \Illuminate\Database\Eloquent\Builder<WorkOrder>  $query
+     */
+    public function scopeActivityEligible($query)
+    {
+        return $query->whereNotIn('status', self::ACTIVITY_INELIGIBLE_STATUSES);
     }
 
     /** WO yang menunggu tindakan persetujuan supervisor. */

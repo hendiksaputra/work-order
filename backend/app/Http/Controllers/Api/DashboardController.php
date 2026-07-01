@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\MechanicActivity;
+use App\Models\MechanicActivitySubmission;
 use App\Models\PartsRequest;
 use App\Models\WorkOrder;
 use Illuminate\Support\Facades\DB;
@@ -21,7 +22,7 @@ class DashboardController extends Controller
             ->count();
 
         $pendingApprovals = WorkOrder::where('status', 'pending_supervisor')->count()
-            + MechanicActivity::where('status', 'pending_approval')->count()
+            + MechanicActivitySubmission::where('status', 'pending_approval')->count()
             + PartsRequest::where('status', 'pending_approval')->count();
 
         $productiveHours = MechanicActivity::where('status', 'approved')

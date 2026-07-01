@@ -9,7 +9,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 class MechanicActivity extends Model
 {
     protected $fillable = [
-        'user_id', 'work_order_id', 'activity_type_id', 'mode',
+        'user_id', 'submission_id', 'work_order_id', 'activity_type_id', 'mode',
         'activity_date', 'start_time', 'end_time', 'total_hours',
         'notes', 'status', 'supervisor_notes', 'approved_by', 'approved_at',
     ];
@@ -46,6 +46,11 @@ class MechanicActivity extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    public function submission(): BelongsTo
+    {
+        return $this->belongsTo(MechanicActivitySubmission::class, 'submission_id');
     }
 
     public function workOrder(): BelongsTo

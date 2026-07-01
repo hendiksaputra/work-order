@@ -137,4 +137,47 @@ class User extends Authenticatable
     {
         return $this->role === 'mechanic';
     }
+
+    public static function bypassesDepartmentScope(string $role): bool
+    {
+        return in_array($role, ['admin', 'planner'], true);
+    }
+
+    public function canViewAllDepartments(): bool
+    {
+        return self::bypassesDepartmentScope($this->role);
+    }
+
+    public function isVisibleTo(User $viewer): bool
+    {
+        if ($viewer->canViewAllDepartments()) {
+            return true;
+        }
+
+        $viewerDept = trim((string) ($viewer->department ?? ''));
+        $targetDept = trim((string) ($this->department ?? ''));
+
+        return $viewerDept === $targetDept;
+    }
+
+    /**
+     * @param  \Illuminate\Database\Eloquent\Builder<User>  $query
+     */
+    public function scopeVisibleTo($query, User $viewer): void
+    {
+        if ($viewer->canViewAllDepartments()) {
+            return;
+        }
+
+        $department = trim((string) ($viewer->department ?? ''));
+        if ($department === '') {
+            $query->where(function ($q) {
+                $q->whereNull('department')->orWhere('department', '');
+            });
+
+            return;
+        }
+
+        $query->where('department', $department);
+    }
 }

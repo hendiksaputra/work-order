@@ -115,6 +115,7 @@ export function CreateWorkOrderModal({
   const [mainList, setMainList] = useState<WorkOrder[]>([]);
   const [loading, setLoading] = useState(false);
   const [form, setForm] = useState(initialForm);
+  const [previewSubWoNumber, setPreviewSubWoNumber] = useState('');
   const formRef = useRef<HTMLFormElement>(null);
 
   useEffect(() => {
@@ -133,6 +134,17 @@ export function CreateWorkOrderModal({
       api<WorkOrder[]>('/work-orders/main-list').then(setMainList);
     }
   }, [open, woType, workOrder?.type]);
+
+  useEffect(() => {
+    if (!open || isEdit || woType !== 'sub' || !form.parent_id) {
+      setPreviewSubWoNumber('');
+      return;
+    }
+
+    api<{ wo_number: string }>(`/work-orders/${form.parent_id}/preview-sub-wo-number`)
+      .then((res) => setPreviewSubWoNumber(res.wo_number))
+      .catch(() => setPreviewSubWoNumber(''));
+  }, [open, isEdit, woType, form.parent_id]);
 
   if (!open) return null;
 
@@ -255,7 +267,11 @@ export function CreateWorkOrderModal({
         <div className="flex items-start justify-between border-b border-slate-200 px-6 py-4">
           <div>
             <h2 id="create-wo-title" className="text-lg font-bold text-slate-900">
-              {isEdit ? 'Edit Work Order' : 'Create Work Order'}
+              {isEdit
+                ? workOrder?.type === 'sub'
+                  ? 'Edit Sub Work Order'
+                  : 'Edit Main Work Order'
+                : 'Create Work Order'}
             </h2>
             <p className="mt-0.5 text-sm text-slate-500">
               {isEdit
@@ -374,6 +390,13 @@ export function CreateWorkOrderModal({
                         </option>
                       ))}
                     </select>
+                    {previewSubWoNumber && (
+                      <p className="mt-1.5 text-xs text-slate-600">
+                        Nomor Sub WO otomatis:{' '}
+                        <span className="font-semibold text-orange-700">{previewSubWoNumber}</span>
+                        {' '}(A, B, C, … mengikuti Main WO)
+                      </p>
+                    )}
                   </div>
                   <div>
                     <label className="text-sm font-medium text-slate-700">Workshop</label>

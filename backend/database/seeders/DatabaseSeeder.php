@@ -87,7 +87,7 @@ class DatabaseSeeder extends Seeder
         );
 
         WorkOrder::updateOrCreate(
-            ['wo_number' => 'SWO-ADIKARA-001'],
+            ['wo_number' => 'WO-ADIKARA-001-A'],
             [
                 'type' => 'sub',
                 'parent_id' => $main1->id,

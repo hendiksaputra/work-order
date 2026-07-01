@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Pencil, Trash2, Upload, FileSpreadsheet, UserCheck, UserX } from 'lucide-react';
+import { Plus, Pencil, Trash2, Upload, FileSpreadsheet, UserCheck, UserX, Download } from 'lucide-react';
 import { api, apiDownload, apiUploadFile } from '@/lib/api';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { Pagination } from '@/components/ui/Pagination';
@@ -27,6 +27,8 @@ export default function UsersSettingsPage() {
   const { user: currentUser, can } = useAuth();
   const canManage = can(Permission.USERS_MANAGE) || currentUser.role === 'admin';
   const canImport = can(Permission.USERS_IMPORT);
+  const seesAllDepartments =
+    currentUser.role === 'admin' || currentUser.role === 'planner';
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState(false);
   const [data, setData] = useState<Paginated<UserRow> | null>(null);
@@ -348,6 +350,21 @@ export default function UsersSettingsPage() {
     }
   };
 
+  const exportExcel = async () => {
+    try {
+      const params = new URLSearchParams();
+      if (search.trim()) params.set('search', search.trim());
+      if (roleFilter) params.set('role', roleFilter);
+      const qs = params.toString();
+      await apiDownload(
+        `/users/export${qs ? `?${qs}` : ''}`,
+        `users-${new Date().toISOString().slice(0, 10)}.xlsx`
+      );
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Export gagal');
+    }
+  };
+
   const downloadTemplate = async () => {
     try {
       await apiDownload('/users/import/template', 'template-import-users.xlsx');
@@ -470,6 +487,14 @@ export default function UsersSettingsPage() {
         />
       )}
 
+      {!seesAllDepartments && (
+        <p className="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+          Menampilkan pengguna pada departemen/lokasi:{' '}
+          <strong>{currentUser.department?.trim() || 'belum diatur'}</strong>. Role Admin dan
+          Planner dapat melihat seluruh departemen.
+        </p>
+      )}
+
       {canImport && (
         <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
           <span className="text-sm font-medium text-slate-700">Import massal:</span>
@@ -532,6 +557,14 @@ export default function UsersSettingsPage() {
         >
           Filter
         </button>
+        <button
+          type="button"
+          onClick={exportExcel}
+          className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+        >
+          <Download className="h-4 w-4" />
+          Export Excel
+        </button>
         {canManage && (checkAllNonAdmin || selectedIds.size > 0) && (
           <button
             type="button"
@@ -578,6 +611,7 @@ export default function UsersSettingsPage() {
               <th className="px-4 py-3 font-semibold">Username</th>
               <th className="px-4 py-3 font-semibold">Email</th>
               <th className="px-4 py-3 font-semibold">NIK</th>
+              <th className="px-4 py-3 font-semibold">Departemen / Lokasi</th>
               <th className="px-4 py-3 font-semibold">Role</th>
               <th className="px-4 py-3 font-semibold">Status</th>
               {canManage && <th className="px-4 py-3 font-semibold text-right">Aksi</th>}
@@ -586,7 +620,7 @@ export default function UsersSettingsPage() {
           <tbody>
             {!data?.data.length ? (
               <tr>
-                <td colSpan={canManage ? 9 : 7} className="px-4 py-12 text-center text-slate-400">
+                <td colSpan={canManage ? 10 : 8} className="px-4 py-12 text-center text-slate-400">
                   {data ? 'Tidak ada data' : 'Memuat...'}
                 </td>
               </tr>
@@ -619,6 +653,7 @@ export default function UsersSettingsPage() {
                   <td className="px-4 py-3 font-mono text-sm text-slate-600">{user.username || '—'}</td>
                   <td className="px-4 py-3 text-slate-600">{user.email}</td>
                   <td className="px-4 py-3 text-slate-600">{user.employee_id || '—'}</td>
+                  <td className="px-4 py-3 text-slate-600">{user.department || '—'}</td>
                   <td className="px-4 py-3">
                     <span className="inline-flex rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-700">
                       {user.role_label || user.role}

@@ -29,7 +29,7 @@
 - Aplikasi dibangun dari **WORK ORDER APS.pptx** dengan stack Laravel 12 + Next.js 16 + MySQL XAMPP.
 - Database: `wo_aps`, default XAMPP `root` tanpa password.
 - Demo password semua user: `password`.
-- Sub WO nomor prefix `SWO-ADIKARA-XXX`, Main WO `WO-ADIKARA-XXX`.
+- Sub WO nomor: `{MAIN}-A`, `{MAIN}-B`, … (contoh `WO-ADIKARA-001-A`). Main WO `WO-ADIKARA-XXX`.
 - Kategori `other` pada Main WO berdiri sendiri (tanpa sub WO) sesuai PPT.
 
 ## 2026-05-19 — Strict RBAC
@@ -56,12 +56,15 @@
 - Permission baru: `work_orders.edit_any_status`, `work_orders.delete_any_status` — assignable di Role & Permission (admin punya semua via matrix).
 - Mechanic Activity: `mechanic_activities.update` / `delete` (draft milik sendiri), `edit_any_status` / `delete_any_status` (admin). Edit/hapus approved memicu `WorkOrder::refreshWorkDetails()`.
 - Parts Request: `parts_requests.update` / `delete` (draft milik sendiri), `edit_any_status` / `delete_any_status` (admin). Edit/hapus status approved/logistic/taken memicu `refreshWorkDetails()`.
-- Supervisor (`parts_requests.supervisor`): Approve/Reject di `/parts` untuk status `pending_approval` (API `POST .../supervisor`); juga tersedia di `/inspection`. Supervisor tidak punya create/edit/delete parts di matrix.
+- Supervisor (`parts_requests.supervisor`): Approve/Reject di `/parts` untuk status `pending_approval` (API `POST .../supervisor`); juga tersedia di `/inspection`. **Scope approval = lokasi/workshop WO** (`WorkOrder::isVisibleTo` — department supervisor harus match `workshop` WO/Sub WO). Admin/planner bypass; logistic lihat semua. API list/count pending difilter per supervisor.
 - Users import Excel: `GET /api/users/import/template`, `POST /api/users/import` (`.xlsx`, `.csv`). Permission `users.import`. Wajib Nama+Role; Username/Email/NIK opsional (auto-generate). Password kosong → `password`.
+- Users export Excel: `GET /api/users/export` (permission `users.view`). Kolom: Nama, Username, Email, NIK, Role, Departemen, Aktif (tanpa password). Query `search` + `role` mengikuti filter halaman.
+- **Filter departemen pengguna:** `User::scopeVisibleTo()` — role **admin** & **planner** lihat semua departemen; role lain hanya pengguna dengan `department` sama. Berlaku di list, export, bulk delete, show/update/delete.
+- **Filter departemen Work Order:** lokasi WO mengikuti **workshop** Sub WO (`rebuild`, `fabrication`, `support`). Kolom Departemen/Lokasi di `/work-orders` menampilkan workshop (Main WO: gabungan workshop Sub WO). `WorkOrder::scopeVisibleTo()` membandingkan `user.department` dengan `workshop` (case-insensitive). Admin & planner lihat semua. Dropdown aktivitas mekanik (`/work-orders/main-list?for_activity=1`, `sub-list?for_activity=1`) memakai filter lokasi yang sama; Sub WO harus sudah disetujui supervisor (bukan draft).
 - Role permission (`/settings/roles`): jika role ada di tabel `roles`, `User::permissionNames()` memakai **hanya** permission DB (bukan merge dengan matrix default). Hapus Parts dari role Mekanik di UI → mekanik tidak lihat menu `/parts`.
 - Kolom `users.username` (unique). Login pakai email atau username. Demo: `admin`, `supervisor`, `planner`, dll.
 - Sidebar menu Work Order: badge jumlah WO belum disetujui untuk user dengan `work_orders.approve` (status `pending_supervisor` + draft WO buatan supervisor). Scope model: `WorkOrder::pendingSupervisorApproval()`. API: `GET /work-orders/pending-approval-count`. Event refresh: `wo-pending-count-changed`.
-- Sidebar menu Parts & Consumable: badge jumlah `pending_approval` untuk user dengan `parts_requests.supervisor`. API: `GET /parts-requests/pending-approval-count`. Event refresh: `parts-pending-count-changed`.
+- Sidebar menu Parts & Consumable: badge jumlah `pending_approval` untuk supervisor (scope lokasi) dan planner/admin (total + breakdown per department supervisor). API: `GET /parts-requests/pending-approval-count` (`by_department[]`: department, count, supervisors). Event refresh: `parts-pending-count-changed`.
 - Sidebar menu Mechanic Activity: badge jumlah `pending_approval` untuk user dengan `mechanic_activities.approve`. API: `GET /mechanic-activities/pending-approval-count`. Event: `activities-pending-count-changed`.
 - `/activities` daftar aktivitas: filter Main WO + Sub WO menampilkan aktivitas **semua mekanik** pada Sub WO yang sama (`GET /mechanic-activities?work_order_id=`). Tanpa filter Sub WO, mekanik hanya lihat aktivitas sendiri. Sub WO harus sudah disetujui supervisor.
 - Work Order Body Details: komponen `WorkOrderBodyDetails` — tabel JOB ACTIVITY (group by activity type), PART & CONSUMABLE, LIST CREW/TEAM dari aktivitas/parts approved. Tampil di `/work-orders` (expand Detail) dan `/work-orders/[id]`.
@@ -152,17 +155,31 @@
 - Hapus aktivitas mekanik → Sub WO `in_execution` tanpa aktivitas working otomatis kembali ke `approved` (`reconcileExecutionStatusFromActivities`).
 - **Multi-mekanik per Sub WO:** Selesai hanya jika jumlah mekanik unik dengan aktivitas approved ≥ `manpower_count` dan tidak ada aktivitas draft/pending. Badge: `Progress (1/2 mekanik)` vs `Selesai (2/2 mekanik)`. Finish diblok jika crew belum lengkap (`WorkOrderMechanicProgress.php`).
 
+## 2026-06-29 — Laporan harian aktivitas mekanik (1 approval per hari)
+
+- Tabel `mechanic_activity_submissions`: satu baris per **mekanik + tanggal** (`user_id`, `activity_date` unique). Field: `status`, `activities_count`, `total_hours`, `submitted_at`, `approved_by`, `approved_at`.
+- `mechanic_activities.submission_id` FK — setiap aktivitas baru otomatis terikat ke submission draft hari tersebut (`MechanicActivity::attachActivity`).
+- **Mekanik:** simpan banyak aktivitas dalam 1 hari → 1 draft submission; **Ajukan Semua Draft** mengajukan per hari (`POST /mechanic-activity-submissions/bulk-submit`). Draft count = jumlah **hari**, bukan baris aktivitas.
+- **Supervisor:** daftar di `/activities` pakai `MechanicActivitySubmissionTable` — 1 baris = 1 mekanik 1 hari, tombol **Detail** expand aktivitas per jam, **Setujui Hari** / **Tolak Hari** untuk semua aktivitas pending sekaligus. Di detail: **Setujui** / **Tolak** per aktivitas. Penolakan wajib isi alasan (`notes` → `supervisor_notes`, min 3 karakter) via `RejectReasonDialog`.
+- **Inspection:** section "Laporan Harian Mekanik" pakai `GET /mechanic-activity-submissions?status=pending_approval`.
+- Pending count badge: `MechanicActivitySubmission` status `pending_approval` (bukan per aktivitas).
+- File: `MechanicActivitySubmission.php`, `MechanicActivitySubmissionController.php`, `MechanicActivitySubmissionTable.tsx`, migration `2026_06_29_120000_create_mechanic_activity_submissions_table.php`.
+
 ## 2026-06-17 — Notifikasi draft aktivitas mekanik
 
-- Badge di navbar **Mechanic Activity** untuk mekanik: jumlah aktivitas **draft** belum diajukan (`GET /mechanic-activities/draft-count`).
+- Badge di navbar **Mechanic Activity** untuk mekanik: jumlah **hari kerja** dengan aktivitas draft (`GET /mechanic-activities/draft-count` → `MechanicActivitySubmission` draft/rejected).
 - Banner peringatan di `/activities` + refresh otomatis via event `activities-draft-count-changed`.
+- **Ajukan bulk:** `POST /mechanic-activity-submissions/bulk-submit` — **Ajukan Semua Draft** mengajukan semua laporan harian draft sekaligus.
+- **Approve bulk supervisor:** `POST /mechanic-activity-submissions/bulk-approve` — **Setujui Semua Pending** menyetujui semua laporan harian pending. Filter opsional `work_order_id`, `user_id`.
+- **Filter daftar supervisor:** `GET /mechanic-activity-submissions` — `user_id`, `search`, `date_from`, `date_to`, `work_order_id`. Dropdown mekanik: `GET /mechanic-activities/filter-mechanics`.
+- **Export riwayat aktivitas:** `GET /reports/mechanic-activity-history/export/excel` dan `/export/pdf` (permission `reports.view`). Mengikuti filter `search`, `date_from`, `date_to`, `status`, `category`. Max 10.000 baris. Paket: `simplexlsxgen`, `dompdf/dompdf`.
 - Supervisor tetap melihat badge **pending approval** (prioritas jika keduanya ada).
 
 ## 2026-06-17 — Jam mulai otomatis setelah istirahat (real-time)
 
 - Tombol manual **Mulai Kerja Siang** dihapus — setelah istirahat selesai (13:00 / Jumat 13:30), jam mulai siang **otomatis** tercatat dari waktu sebenarnya (`ensureAfternoonSessionAutoStarted`).
 - Polling sesi setiap 1 detik agar resume tepat setelah istirahat.
-- Jam mulai pagi tetap dari login; jam berjalan ditampilkan real-time di form.
+- Jam mulai pagi otomatis **08:00** (bukan jam login); lanjutan sesi dari jam selesai aktivitas sebelumnya; jam berjalan ditampilkan real-time di form.
 - File: `mechanic-day-session.ts`, `AfternoonStartPanel.tsx`, `MechanicAutoTimeFields.tsx`, `activities/page.tsx`.
 
 ## 2026-06-17 — Jam selesai manual (tombol Stop)
@@ -170,7 +187,7 @@
 - `/activities`: jam selesai **tidak lagi otomatis** mengikuti jam sekarang; mekanik wajib tekan tombol merah **Stop** sebelum **Simpan Aktivitas**.
 - Jam istirahat tetap dipisah otomatis di backend saat simpan (rentang 12:00–13:00 / Jumat lebih panjang).
 - Panel lembur (`OvertimeRequestPanel`) hanya muncul **setelah Stop** jika jam selesai melewati 18:00; simpan tetap diblok sampai supervisor menyetujui.
-- **Jam Mulai** tetap dari login pertama / lanjutan sesi / anchor otomatis sesi siang setelah istirahat (tetap, tidak mengikuti jam berjalan).
+- **Jam Mulai** pagi default **08:00** — mekanik wajib tekan tombol hijau **Start** sebelum **Stop** / simpan; lanjutan sesi dari aktivitas sebelumnya / auto-start sesi siang setelah istirahat.
 - **Jam berjalan** menampilkan waktu real-time terpisah di samping tombol Stop.
 - File: `MechanicAutoTimeFields.tsx`, `activities/page.tsx` (`endTimeStopped`, `handleStopWork`, `resetWorkStopState`).
 

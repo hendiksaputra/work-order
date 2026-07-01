@@ -7,13 +7,20 @@ import { api } from '@/lib/api';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { Badge } from '@/components/ui/Badge';
 import { EditPartsRequestModal } from '@/components/parts/EditPartsRequestModal';
+import { PartsRequestDetailModal } from '@/components/parts/PartsRequestDetailModal';
 import { PartsRequestItemsEditor } from '@/components/parts/PartsRequestItemsEditor';
-import type { Paginated, PartsRequest, PartsRequestItem, WorkOrder } from '@/lib/types';
+import { PartsWorkOrderSearch } from '@/components/parts/PartsWorkOrderSearch';
+import { PartsPendingPlannerNotice } from '@/components/parts/PartsPendingPlannerNotice';
+import type { Paginated, PartsRequest, PartsRequestItem, PartsPendingApprovalSummary, WorkOrder } from '@/lib/types';
 import { useAuth } from '@/lib/auth-context';
 import { Permission } from '@/lib/permissions';
+import { canViewAllDepartments } from '@/lib/department-scope';
+import { formatWorkshopLabel, resolveWorkshopFromWorkOrder } from '@/lib/parts-workshop';
 import {
   canDeletePartsRequest,
   canEditPartsRequest,
+  canLogisticCheckPartsRequest,
+  canLogisticTakenPartsRequest,
   canSubmitPartsRequest,
   canSupervisorApprovePartsRequest,
 } from '@/lib/parts-request-access';
@@ -25,24 +32,56 @@ export default function PartsPage() {
   const canDelete = can(Permission.PARTS_DELETE);
   const canDeleteAny = can(Permission.PARTS_DELETE_ANY_STATUS);
   const canSupervisor = can(Permission.PARTS_SUPERVISOR);
+  const canLogistic = can(Permission.PARTS_LOGISTIC);
+  const isLogisticRole = user?.role === 'logistic';
   const canCreate = can(Permission.PARTS_CREATE);
+  const showPlannerPartsSummary = canViewAllDepartments(user);
   const [requests, setRequests] = useState<Paginated<PartsRequest> | null>(null);
+  const [pendingSummary, setPendingSummary] = useState<PartsPendingApprovalSummary | null>(null);
   const [woList, setWoList] = useState<WorkOrder[]>([]);
   const [editingRequest, setEditingRequest] = useState<PartsRequest | null>(null);
+  const [detailRequest, setDetailRequest] = useState<PartsRequest | null>(null);
+  const [detailLoadingId, setDetailLoadingId] = useState<number | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [form, setForm] = useState({
     work_order_id: '',
-    workshop: 'rebuild',
+    workshop: '',
     notes: '',
     items: [{ part_name: '', part_number: '', qty: 1, unit: 'pcs', in_stock: true, unit_cost: 0 }] as PartsRequestItem[],
   });
 
+  const handleWorkOrderChange = (work_order_id: string) => {
+    const wo = woList.find((w) => String(w.id) === work_order_id);
+    setForm((prev) => ({
+      ...prev,
+      work_order_id,
+      workshop: resolveWorkshopFromWorkOrder(wo),
+    }));
+  };
+
   const load = () => api<Paginated<PartsRequest>>('/parts-requests').then(setRequests);
+
+  const loadPendingSummary = () => {
+    if (!showPlannerPartsSummary) {
+      setPendingSummary(null);
+      return Promise.resolve();
+    }
+    return api<PartsPendingApprovalSummary>('/parts-requests/pending-approval-count')
+      .then(setPendingSummary)
+      .catch(() => setPendingSummary(null));
+  };
 
   useEffect(() => {
     load();
+    loadPendingSummary();
     api<WorkOrder[]>('/work-orders/main-list').then(setWoList);
-  }, []);
+
+    const onPartsRefresh = () => {
+      loadPendingSummary();
+    };
+    window.addEventListener('parts-pending-count-changed', onPartsRefresh);
+    return () => window.removeEventListener('parts-pending-count-changed', onPartsRefresh);
+  }, [showPlannerPartsSummary]);
 
   const openEdit = async (request: PartsRequest) => {
     try {
@@ -50,6 +89,18 @@ export default function PartsPage() {
       setEditingRequest(full);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Gagal memuat detail request');
+    }
+  };
+
+  const openDetail = async (request: PartsRequest) => {
+    setDetailLoadingId(request.id);
+    try {
+      const full = await api<PartsRequest>(`/parts-requests/${request.id}`);
+      setDetailRequest(full);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Gagal memuat detail request');
+    } finally {
+      setDetailLoadingId(null);
     }
   };
 
@@ -76,6 +127,10 @@ export default function PartsPage() {
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!form.workshop) {
+      alert('Workshop tidak terdeteksi dari WO yang dipilih. Pastikan WO memiliki lokasi/workshop.');
+      return;
+    }
     try {
       await api('/parts-requests', {
         method: 'POST',
@@ -87,6 +142,7 @@ export default function PartsPage() {
         }),
       });
       await load();
+      await loadPendingSummary();
       alert('Parts request dibuat (status draft). Klik Ajukan untuk kirim ke supervisor.');
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Gagal menyimpan parts request');
@@ -99,6 +155,7 @@ export default function PartsPage() {
     try {
       await api(`/parts-requests/${request.id}/submit`, { method: 'POST' });
       await load();
+      await loadPendingSummary();
       window.dispatchEvent(new Event('parts-pending-count-changed'));
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Gagal mengajukan parts request');
@@ -130,6 +187,7 @@ export default function PartsPage() {
         body: JSON.stringify({ action }),
       });
       await load();
+      await loadPendingSummary();
       window.dispatchEvent(new Event('parts-pending-count-changed'));
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Gagal memproses parts request');
@@ -137,25 +195,31 @@ export default function PartsPage() {
   };
 
   const ic = 'w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm';
+  const icReadonly = `${ic} cursor-default bg-slate-50 text-slate-700`;
 
   return (
     <div className="p-8">
       <PageHeader
         title="Parts & Consumable"
         subtitle={
-          canCreate
-            ? 'Pilih WO, workshop, isi form lengkap — outstanding jika tidak ada stock'
+          showPlannerPartsSummary
+            ? 'Monitor permintaan parts — badge menu menampilkan jumlah yang menunggu approval per supervisor/lokasi'
+            : canCreate
+            ? 'Pilih WO — workshop otomatis dari lokasi WO, isi form lengkap'
             : canSupervisor
               ? 'Supervisor: setujui request status menunggu approval (Approve/Reject) atau gunakan menu Inspection'
-              : can(Permission.PARTS_LOGISTIC)
+              : isLogisticRole && canLogistic
                 ? 'Logistic: proses request yang sudah disetujui supervisor (Cek / Diambil)'
                 : 'Daftar permintaan parts & consumable'
         }
       />
 
+      {showPlannerPartsSummary && <PartsPendingPlannerNotice summary={pendingSummary} />}
+
       {canSupervisor && !canCreate && (
         <p className="mb-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
-          Request dengan status <strong>Menunggu Approval</strong> dapat disetujui di kolom Aksi di bawah, atau di{' '}
+          Request dengan status <strong>Menunggu Approval</strong> dapat disetujui di kolom Aksi di bawah jika WO sesuai
+          lokasi/workshop Anda ({user?.department || '—'}), atau di{' '}
           <Link href="/inspection" className="font-semibold underline">
             Inspection → Parts & Consumable
           </Link>
@@ -168,20 +232,23 @@ export default function PartsPage() {
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className="text-sm font-medium">Work Order</label>
-            <select className={ic} value={form.work_order_id} onChange={(e) => setForm({ ...form, work_order_id: e.target.value })} required>
-              <option value="">Pilih WO</option>
-              {woList.map((w) => (
-                <option key={w.id} value={w.id}>{w.wo_number} — {w.title}</option>
-              ))}
-            </select>
+            <PartsWorkOrderSearch
+              workOrders={woList}
+              value={form.work_order_id}
+              onChange={handleWorkOrderChange}
+              required
+            />
           </div>
           <div>
             <label className="text-sm font-medium">Workshop</label>
-            <select className={ic} value={form.workshop} onChange={(e) => setForm({ ...form, workshop: e.target.value })}>
-              <option value="rebuild">Rebuild</option>
-              <option value="fabrication">Fabrication</option>
-              <option value="support">Support</option>
-            </select>
+            <input
+              type="text"
+              readOnly
+              className={`${icReadonly} mt-1`}
+              value={formatWorkshopLabel(form.workshop)}
+              placeholder="Otomatis dari WO"
+              tabIndex={-1}
+            />
           </div>
         </div>
 
@@ -217,17 +284,9 @@ export default function PartsPage() {
               const canEdit = canEditPartsRequest(r, user, canUpdate, canEditAny);
               const canDel = canDeletePartsRequest(r, user, canDelete, canDeleteAny);
               const canSubmitRow = canSubmitPartsRequest(r, user, can(Permission.PARTS_SUBMIT));
-              const canApproveRow = canSupervisorApprovePartsRequest(r, canSupervisor);
-              const canLogisticCheck = can(Permission.PARTS_LOGISTIC) && r.status === 'approved';
-              const canLogisticTaken =
-                can(Permission.PARTS_LOGISTIC) && ['approved', 'logistic_check'].includes(r.status);
-              const hasActions =
-                canEdit ||
-                canDel ||
-                canSubmitRow ||
-                canApproveRow ||
-                canLogisticCheck ||
-                canLogisticTaken;
+              const canApproveRow = canSupervisorApprovePartsRequest(r, user, canSupervisor);
+              const canLogisticCheck = canLogisticCheckPartsRequest(r, user, canLogistic);
+              const canLogisticTaken = canLogisticTakenPartsRequest(r, user, canLogistic);
 
               return (
                 <tr key={r.id} className="border-t">
@@ -238,8 +297,15 @@ export default function PartsPage() {
                   <td className="px-4 py-3">{r.items?.length} item(s)</td>
                   <td className="px-4 py-3"><Badge status={r.status} /></td>
                   <td className="px-4 py-3">
-                    {hasActions ? (
-                      <div className="flex flex-wrap justify-end gap-1">
+                    <div className="flex flex-wrap justify-end gap-1">
+                      <button
+                        type="button"
+                        disabled={detailLoadingId === r.id}
+                        onClick={() => openDetail(r)}
+                        className="rounded px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+                      >
+                        {detailLoadingId === r.id ? 'Memuat…' : 'Detail'}
+                      </button>
                         {canSubmitRow && (
                           <button
                             type="button"
@@ -306,10 +372,7 @@ export default function PartsPage() {
                             <Trash2 className="h-4 w-4" />
                           </button>
                         )}
-                      </div>
-                    ) : (
-                      <span className="block text-right text-slate-300">—</span>
-                    )}
+                    </div>
                   </td>
                 </tr>
               );
@@ -317,6 +380,13 @@ export default function PartsPage() {
           </tbody>
         </table>
       </div>
+
+      {detailRequest && (
+        <PartsRequestDetailModal
+          request={detailRequest}
+          onClose={() => setDetailRequest(null)}
+        />
+      )}
 
       {editingRequest && (
         <EditPartsRequestModal

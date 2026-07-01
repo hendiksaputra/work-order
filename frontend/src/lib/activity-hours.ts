@@ -1,6 +1,7 @@
 export const LUNCH_BREAK_START = '12:00';
 export const LUNCH_BREAK_END_WEEKDAY = '13:00';
 export const LUNCH_BREAK_END_FRIDAY = '13:30';
+export const STANDARD_WORK_START = '08:00';
 export const STANDARD_WORK_END = '18:00';
 
 export type ActivitySegment = { type: 'work' | 'break'; start: string; end: string };

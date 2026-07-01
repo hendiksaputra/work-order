@@ -7,13 +7,17 @@ export function ReportBlock({ title, description, children }: {
     <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
       <h3 className="font-semibold text-slate-900">{title}</h3>
       {description && <p className="mt-1 text-sm text-slate-500">{description}</p>}
-      <div className="mt-4 overflow-x-auto">{children}</div>
+      <div className="mt-4">{children}</div>
     </section>
   );
 }
 
 export function ReportTable({ children }: { children: React.ReactNode }) {
-  return <table className="w-full min-w-[640px] text-sm">{children}</table>;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[640px] text-sm">{children}</table>
+    </div>
+  );
 }
 
 export function ReportTh({ children, className = '' }: { children: React.ReactNode; className?: string }) {

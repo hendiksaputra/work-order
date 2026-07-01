@@ -17,17 +17,19 @@ class WorkOrderController extends Controller
 {
     use AuthorizesRequests;
 
-    /** Status WO/Sub WO yang belum boleh dipakai untuk aktivitas mekanik. */
-    private const ACTIVITY_INELIGIBLE_STATUSES = ['draft', 'pending_supervisor', 'rejected', 'closed'];
-
     public function __construct(private WorkOrderService $woService) {}
 
     public function index(Request $request)
     {
-        $query = WorkOrder::with([
+        $viewer = $request->user();
+
+        $query = WorkOrder::visibleTo($viewer)->with([
             'creator',
             'parent',
-            'subWorkOrders' => WorkOrderMechanicProgress::subWorkOrdersWithMechanicCountsQuery(),
+            'subWorkOrders' => function ($subQuery) use ($viewer) {
+                WorkOrderMechanicProgress::subWorkOrdersWithMechanicCountsQuery()($subQuery);
+                $subQuery->visibleTo($viewer);
+            },
         ])
             ->withCount(WorkOrderMechanicProgress::mechanicCountRelations())
             ->latest();
@@ -54,9 +56,11 @@ class WorkOrderController extends Controller
         return response()->json($query->paginate($request->integer('per_page', 15)));
     }
 
-    public function pendingApprovalCount()
+    public function pendingApprovalCount(Request $request)
     {
-        $count = WorkOrder::pendingSupervisorApproval()->count();
+        $count = WorkOrder::pendingSupervisorApproval()
+            ->visibleTo($request->user())
+            ->count();
 
         return response()->json([
             'count' => $count,
@@ -64,8 +68,12 @@ class WorkOrderController extends Controller
         ]);
     }
 
-    public function show(WorkOrder $workOrder)
+    public function show(Request $request, WorkOrder $workOrder)
     {
+        if ($denied = $this->denyUnlessWorkOrderVisible($request, $workOrder)) {
+            return $denied;
+        }
+
         $workOrder->load([
             'creator', 'parent.subWorkOrders', 'subWorkOrders',
             'mechanicActivities.activityType', 'mechanicActivities.user',
@@ -127,10 +135,14 @@ class WorkOrderController extends Controller
 
         $wo = WorkOrder::create([
             ...$data,
-            'wo_number' => $this->woService->generateWoNumber($data['type']),
+            'wo_number' => $this->woService->generateWoNumber(
+                $data['type'],
+                $data['type'] === 'sub' ? (int) $data['parent_id'] : null
+            ),
             'status' => 'draft',
             'operational_status' => WorkOrderOperationalStatus::OPEN,
             'created_by' => $request->user()->id,
+            'department' => $this->resolveDepartmentForCreate($data),
         ]);
 
         return response()->json($wo->load('creator'), 201);
@@ -138,6 +150,10 @@ class WorkOrderController extends Controller
 
     public function update(Request $request, WorkOrder $workOrder)
     {
+        if ($denied = $this->denyUnlessWorkOrderVisible($request, $workOrder)) {
+            return $denied;
+        }
+
         if ($denied = $this->denyUnless(
             $this->canEditWorkOrder($request, $workOrder),
             'Anda tidak memiliki izin mengubah Work Order ini.'
@@ -194,6 +210,10 @@ class WorkOrderController extends Controller
 
     public function updateOperationalFields(Request $request, WorkOrder $workOrder)
     {
+        if ($denied = $this->denyUnlessWorkOrderVisible($request, $workOrder)) {
+            return $denied;
+        }
+
         if ($denied = $this->denyUnless(
             $request->user()->hasPermission(Permission::WORK_ORDERS_APPROVE)
                 || $request->user()->hasPermission(Permission::WORK_ORDERS_EDIT_ANY_STATUS),
@@ -230,6 +250,10 @@ class WorkOrderController extends Controller
 
     public function destroy(Request $request, WorkOrder $workOrder)
     {
+        if ($denied = $this->denyUnlessWorkOrderVisible($request, $workOrder)) {
+            return $denied;
+        }
+
         if ($denied = $this->denyUnless(
             $this->canDeleteWorkOrder($request, $workOrder),
             'Anda tidak memiliki izin menghapus Work Order ini.'
@@ -257,6 +281,10 @@ class WorkOrderController extends Controller
 
     public function submit(Request $request, WorkOrder $workOrder)
     {
+        if ($denied = $this->denyUnlessWorkOrderVisible($request, $workOrder)) {
+            return $denied;
+        }
+
         if ($denied = $this->denyUnless(
             $this->canManageWorkOrder($request, $workOrder),
             'Anda tidak dapat mengajukan WO ini.'
@@ -285,6 +313,10 @@ class WorkOrderController extends Controller
 
     public function approve(Request $request, WorkOrder $workOrder)
     {
+        if ($denied = $this->denyUnlessWorkOrderVisible($request, $workOrder)) {
+            return $denied;
+        }
+
         $request->validate([
             'action' => 'required|in:approve,reject',
             'notes' => 'nullable|string',
@@ -379,22 +411,53 @@ class WorkOrderController extends Controller
         return "Work Order {$wo->wo_number} {$detail}.";
     }
 
+    public function previewSubWoNumber(Request $request, WorkOrder $workOrder)
+    {
+        if ($workOrder->type !== 'main') {
+            return response()->json(['message' => 'Hanya Main WO yang dapat memiliki Sub WO.'], 422);
+        }
+
+        if (
+            ! $workOrder->isVisibleTo($request->user())
+            && ! $request->user()->hasPermission(Permission::WORK_ORDERS_SUB_CREATE)
+            && ! $request->user()->hasPermission(Permission::WORK_ORDERS_CREATE)
+        ) {
+            return response()->json(['message' => 'Work Order tidak ditemukan.'], 404);
+        }
+
+        return response()->json([
+            'wo_number' => $this->woService->generateSubWoNumber($workOrder->id),
+        ]);
+    }
+
     public function mainList(Request $request)
     {
-        $query = WorkOrder::where('type', 'main');
+        $viewer = $request->user();
 
         if ($request->boolean('for_activity')) {
-            $query
-                ->whereNotIn('status', self::ACTIVITY_INELIGIBLE_STATUSES)
-                ->whereHas('subWorkOrders', function ($q) {
-                    $q->whereNotIn('status', self::ACTIVITY_INELIGIBLE_STATUSES);
-                });
+            $query = WorkOrder::query()
+                ->where('type', 'main')
+                ->activityEligible();
+
+            $this->applyActivityLocationScope($query, $viewer);
+
+            $query->whereHas('subWorkOrders', function ($subQuery) use ($viewer) {
+                $subQuery->activityEligible();
+                $this->applyActivityLocationScope($subQuery, $viewer);
+            });
         } else {
+            $query = WorkOrder::where('type', 'main');
+
+            if (! $this->canPickAnyMainForSubCreate($viewer)) {
+                $this->applyActivityLocationScope($query, $viewer);
+            }
+
             $query->whereNotIn('status', ['closed', 'rejected']);
         }
 
         $list = $query
-            ->select('id', 'wo_number', 'title', 'main_category', 'status')
+            ->with(['subWorkOrders:id,parent_id,workshop'])
+            ->select('id', 'wo_number', 'title', 'main_category', 'status', 'workshop', 'type')
             ->orderByDesc('id')
             ->get();
 
@@ -403,15 +466,38 @@ class WorkOrderController extends Controller
 
     public function subList(Request $request)
     {
+        $viewer = $request->user();
         $query = WorkOrder::where('type', 'sub')
             ->with('parent:id,wo_number,title');
+
         if ($request->boolean('for_activity')) {
-            $query->whereNotIn('status', self::ACTIVITY_INELIGIBLE_STATUSES);
+            $query->activityEligible();
         } else {
             $query->whereNotIn('status', ['closed', 'rejected']);
         }
+
+        $this->applyActivityLocationScope($query, $viewer);
+
         $list = $query
-            ->select('id', 'wo_number', 'title', 'workshop', 'status', 'parent_id')
+            ->withSum(
+                ['mechanicActivities as logged_hours_sum' => function ($activityQuery) {
+                    $activityQuery
+                        ->where('mode', 'working')
+                        ->where('status', '!=', 'rejected');
+                }],
+                'total_hours'
+            )
+            ->select(
+                'id',
+                'wo_number',
+                'title',
+                'workshop',
+                'status',
+                'parent_id',
+                'target_hours',
+                'estimated_hours',
+                'actual_hours'
+            )
             ->orderBy('wo_number')
             ->get();
 
@@ -425,6 +511,42 @@ class WorkOrderController extends Controller
             : User::find($workOrder->created_by);
 
         return $creator?->role === 'supervisor';
+    }
+
+    private function denyUnlessWorkOrderVisible(Request $request, WorkOrder $workOrder)
+    {
+        if ($workOrder->isVisibleTo($request->user())) {
+            return null;
+        }
+
+        return response()->json(['message' => 'Work Order tidak ditemukan.'], 404);
+    }
+
+    private function resolveDepartmentForCreate(array $data): ?string
+    {
+        if (($data['type'] ?? '') === 'sub' && ! empty($data['workshop'])) {
+            return $data['workshop'];
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  \Illuminate\Database\Eloquent\Builder<WorkOrder>  $query
+     */
+    private function applyActivityLocationScope($query, User $viewer): void
+    {
+        if ($viewer->canViewAllDepartments()) {
+            return;
+        }
+
+        $query->visibleTo($viewer);
+    }
+
+    private function canPickAnyMainForSubCreate(User $user): bool
+    {
+        return $user->hasPermission(Permission::WORK_ORDERS_SUB_CREATE)
+            || $user->hasPermission(Permission::WORK_ORDERS_CREATE);
     }
 
     private function canManageWorkOrder(Request $request, WorkOrder $workOrder, string $action = 'edit'): bool
